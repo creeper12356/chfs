@@ -89,6 +89,7 @@ class Inode {
   // The actual number of blocks should be larger,
   // which is dynamically calculated based on the block size
 public:
+  // 长度为0的数组用于实现不确定长度的block_id数组
   [[maybe_unused]] block_id_t blocks[0];
 
 public:
