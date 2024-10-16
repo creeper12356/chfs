@@ -139,8 +139,19 @@ namespace chfs
   {
     std::list<DirectoryEntry> list;
 
-    // TODO: Implement this function.
-    UNIMPLEMENTED();
+    auto read_dir_res = read_directory(this, id, list);
+    if (read_dir_res.is_err())
+    {
+      return ChfsResult<inode_id_t>(read_dir_res.unwrap_error());
+    }
+
+    auto it = std::find_if(list.begin(), list.end(), [name](const DirectoryEntry &entry)
+                           { return entry.name == name; });
+
+    if (it != list.end())
+    {
+      return ChfsResult<inode_id_t>((*it).id);
+    }
 
     return ChfsResult<inode_id_t>(ErrorType::NotExist);
   }
@@ -153,9 +164,47 @@ namespace chfs
     // TODO:
     // 1. Check if `name` already exists in the parent.
     //    If already exist, return ErrorType::AlreadyExist.
+    auto list = std::list<DirectoryEntry>();
+    auto read_dir_res = read_directory(this, id, list);
+    if (read_dir_res.is_err())
+    {
+      return ChfsResult<inode_id_t>(read_dir_res.unwrap_error());
+    }
+
+    auto it = std::find_if(list.begin(), list.end(), [name](const DirectoryEntry &entry)
+                           { return entry.name == name; });
+    if (it != list.end())
+    {
+      return ChfsResult<inode_id_t>(ErrorType::AlreadyExist);
+    }
+
     // 2. Create the new inode.
+    auto allocate_block_res = this->block_allocator_->allocate();
+    if (allocate_block_res.is_err())
+    {
+      return ChfsResult<inode_id_t>(allocate_block_res.unwrap_error());
+    }
+    auto allocate_inode_res = this->inode_manager_->allocate_inode(type, allocate_block_res.unwrap());
+    if (allocate_inode_res.is_err())
+    {
+      return ChfsResult<inode_id_t>(allocate_inode_res.unwrap_error());
+    }
+
     // 3. Append the new entry to the parent directory.
-    UNIMPLEMENTED();
+    auto read_dir_file_res = this->read_file(id);
+    if (read_dir_file_res.is_err())
+    {
+      return ChfsResult<inode_id_t>(read_dir_file_res.unwrap_error());
+    }
+    auto buffer = read_dir_file_res.unwrap();
+    auto dir_src = std::string(buffer.begin(), buffer.end());
+
+    dir_src = append_to_directory(dir_src, name, allocate_inode_res.unwrap());
+    auto write_dir_file_res = this->write_file(id, std::vector<u8>(dir_src.begin(), dir_src.end()));
+    if (write_dir_file_res.is_err())
+    {
+      return ChfsResult<inode_id_t>(write_dir_file_res.unwrap_error());
+    }
 
     return ChfsResult<inode_id_t>(static_cast<inode_id_t>(0));
   }
@@ -167,8 +216,28 @@ namespace chfs
 
     // TODO:
     // 1. Remove the file, you can use the function `remove_file`
+    auto lookup_res = this->lookup(parent, name);
+    if (lookup_res.is_err())
+    {
+      return ChfsNullResult(lookup_res.unwrap_error());
+    }
+    this->remove_file(lookup_res.unwrap());
+
     // 2. Remove the entry from the directory.
-    UNIMPLEMENTED();
+    auto read_dir_file_res = this->read_file(parent);
+    if (read_dir_file_res.is_err())
+    {
+      return ChfsNullResult(read_dir_file_res.unwrap_error());
+    }
+    auto buffer = read_dir_file_res.unwrap();
+    auto dir_src = std::string(buffer.begin(), buffer.end());
+    dir_src = rm_from_directory(dir_src, name);
+
+    auto write_dir_file_res = this->write_file(parent, std::vector<u8>(dir_src.begin(), dir_src.end()));
+    if (write_dir_file_res.is_err())
+    {
+      return ChfsNullResult(write_dir_file_res.unwrap_error());
+    }
 
     return KNullOk;
   }
