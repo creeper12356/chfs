@@ -78,6 +78,7 @@ namespace chfs
   auto InodeManager::allocate_inode(InodeType type, block_id_t bid)
       -> ChfsResult<inode_id_t>
   {
+    // 在inode bitmap范围查找空闲inode
     auto iter_res = BlockIterator::create(this->bm.get(), 1 + n_table_blocks,
                                           1 + n_table_blocks + n_bitmap_blocks);
     if (iter_res.is_err())
@@ -108,21 +109,19 @@ namespace chfs
         }
 
         // TODO:
-        // 1. Initialize the inode with the given type.
-        // 2. Setup the inode table.
-        // 3. Return the id of the allocated inode.
-        //    You may have to use the `RAW_2_LOGIC` macro
-        //    to get the result inode id.
 
-        // 将inode属性写入对应的inode block
-        // 暂时不需要考虑inode的block_id内容
+        // 1. Initialize the inode with the given type.
         std::vector<u8> inode_block_buffer(bm->block_size());
         auto inode = Inode(type, bm->block_size());
         inode.flush_to_buffer(inode_block_buffer.data());
         bm->write_block(bid, inode_block_buffer.data());
 
-        this->set_table(free_idx.value(), bid);
+        // 2. Setup the inode table.
+        this->set_table(count * bm->block_size() * KBitsPerByte + free_idx.value(), bid);
 
+        // 3. Return the id of the allocated inode.
+        //    You may have to use the `RAW_2_LOGIC` macro
+        //    to get the result inode id.
         return ChfsResult<inode_id_t>(
             RAW_2_LOGIC(
                 count * bm->block_size() * KBitsPerByte + free_idx.value()));

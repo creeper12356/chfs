@@ -168,6 +168,7 @@ auto BlockAllocator::deallocate(block_id_t block_id) -> ChfsNullResult {
     return ChfsNullResult(ErrorType::INVALID_ARG);
   }
   bitmap.clear(bit_idx);
+  this->bm->write_block(block_idx + this->bitmap_block_id, buffer.data()); // :( 忘记写回bitmap block了！
 
   return KNullOk;
 }
