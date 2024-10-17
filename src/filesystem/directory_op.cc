@@ -48,11 +48,11 @@ namespace chfs
   {
     if (src.empty())
     {
-      src = filename + ":" + std::to_string(id);
+      src = filename + ":" + inode_id_to_string(id);
     }
     else
     {
-      src += "/" + filename + ":" + std::to_string(id);
+      src += "/" + filename + ":" + inode_id_to_string(id);
     }
     return src;
   }
@@ -63,6 +63,7 @@ namespace chfs
     size_t idx = 0;
     size_t len = src.size();
     std::string name;
+    std::string inode_id_str;
     inode_id_t inode_id;
 
     while (idx < len)
@@ -78,7 +79,9 @@ namespace chfs
       assert(idx < len);
 
       find_res = src.find_first_of('/', idx);
-      inode_id = std::stol(src.substr(idx, find_res - idx));
+
+      inode_id_str = src.substr(idx, find_res - idx);
+      inode_id = string_to_inode_id(inode_id_str);
 
       list.push_back(DirectoryEntry({name, inode_id}));
 
@@ -98,7 +101,7 @@ namespace chfs
     size_t filename_idx = 0;
     while (true)
     {
-      filename_idx = src.find_first_of(filename + ":", filename_idx);
+      filename_idx = src.find(filename + ":", filename_idx);
       assert(filename_idx != std::string::npos);
       if (filename_idx == 0 || src[filename_idx - 1] == '/')
       {
@@ -108,8 +111,14 @@ namespace chfs
     }
 
     size_t slash_idx = src.find_first_of('/', filename_idx);
-    assert(slash_idx != std::string::npos);
-    src.erase(filename_idx, slash_idx - filename_idx);
+    if (slash_idx == std::string::npos)
+    {
+      src.erase(filename_idx - (filename_idx == 0 ? 0 : 1));
+    }
+    else
+    {
+      src.erase(filename_idx - (filename_idx == 0 ? 0 : 1), slash_idx - filename_idx + 1);
+    }
     res = std::move(src);
     return res;
   }
@@ -164,17 +173,8 @@ namespace chfs
     // TODO:
     // 1. Check if `name` already exists in the parent.
     //    If already exist, return ErrorType::AlreadyExist.
-    auto list = std::list<DirectoryEntry>();
-    auto read_dir_res = read_directory(this, id, list);
-    if (read_dir_res.is_err())
-    {
-      return ChfsResult<inode_id_t>(read_dir_res.unwrap_error());
-    }
-
-    auto it = std::find_if(list.begin(), list.end(), [name](const DirectoryEntry &entry)
-                           { return entry.name == name; });
-    if (it != list.end())
-    {
+    auto lookup_res = this->lookup(id, name);
+    if(lookup_res.is_ok()) {
       return ChfsResult<inode_id_t>(ErrorType::AlreadyExist);
     }
 
@@ -206,7 +206,7 @@ namespace chfs
       return ChfsResult<inode_id_t>(write_dir_file_res.unwrap_error());
     }
 
-    return ChfsResult<inode_id_t>(static_cast<inode_id_t>(0));
+    return ChfsResult<inode_id_t>(allocate_inode_res.unwrap());
   }
 
   // {Your code here}
