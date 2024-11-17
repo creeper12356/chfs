@@ -57,34 +57,37 @@ DataServer::~DataServer() { server_.reset(); }
 // {Your code here}
 auto DataServer::read_data(block_id_t block_id, usize offset, usize len,
                            version_t version) -> std::vector<u8> {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  auto block_data = std::make_unique<u8>(block_allocator_->bm->block_size());
+  auto read_block_res = block_allocator_->bm->read_block(block_id, block_data.get());
+  if(read_block_res.is_err()) {
+    return {};
+  }
 
-  return {};
+  // TODO: validate version
+
+  return std::vector<u8> (block_data.get() + offset, block_data.get() + offset + len);
 }
 
 // {Your code here}
 auto DataServer::write_data(block_id_t block_id, usize offset,
                             std::vector<u8> &buffer) -> bool {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
-
-  return false;
+  auto write_partial_block_res = block_allocator_->bm->write_partial_block(block_id, buffer.data(), offset, buffer.size());
+  return write_partial_block_res.is_ok();
 }
 
 // {Your code here}
 auto DataServer::alloc_block() -> std::pair<block_id_t, version_t> {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
-
-  return {};
+  auto allocate_res = block_allocator_->allocate();
+  if(allocate_res.is_err()) {
+    return {};
+  }
+  // TODO: use a valid version instead of 0
+  return std::make_pair<block_id_t, version_t>(allocate_res.unwrap(), 0);
 }
 
 // {Your code here}
 auto DataServer::free_block(block_id_t block_id) -> bool {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
-
-  return false;
+  auto free_res = block_allocator_->deallocate(block_id);
+  return free_res.is_ok();
 }
 } // namespace chfs

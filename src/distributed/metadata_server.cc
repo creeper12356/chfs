@@ -122,18 +122,17 @@ MetadataServer::MetadataServer(std::string const &address, u16 port,
 // {Your code here}
 auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
     -> inode_id_t {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  auto mk_res = operation_->mk_helper(parent, name.c_str(), static_cast<InodeType>(type));
+  if(mk_res.is_err()) {
+    return KInvalidInodeID;
+  }
 
-  return 0;
+  return mk_res.unwrap();
 }
 
 // {Your code here}
 auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
     -> bool {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
-
   return false;
 }
 
