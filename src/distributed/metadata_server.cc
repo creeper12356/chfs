@@ -133,22 +133,90 @@ auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
 // {Your code here}
 auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
     -> bool {
-  return false;
+    // NOTE: logic similar to FileOperation::unlink, but different
+    // 1. Remove the file, you can use the function `remove_file`
+    auto child = lookup(parent, name);
+    if (child == KInvalidInodeID)
+    {
+      // file with name `name` do not exist
+      return false;
+    }
+    remove_file(child);
+
+    // 2. Remove the entry from the directory.
+    auto read_dir_file_res = operation_->read_file(parent);
+    if (read_dir_file_res.is_err())
+    {
+      return false;
+    }
+    auto buffer = read_dir_file_res.unwrap();
+    auto dir_src = std::string(buffer.begin(), buffer.end());
+    dir_src = rm_from_directory(dir_src, name);
+
+    auto write_dir_file_res = operation_->write_file(parent, std::vector<u8>(dir_src.begin(), dir_src.end()));
+    if (write_dir_file_res.is_err())
+    {
+      return false;
+    }
+    return true;
+}
+
+auto MetadataServer::remove_file(inode_id_t id) -> ChfsNullResult {
+  auto error_code = ErrorType::DONE;
+  std::vector<block_id_t> free_set;
+  block_id_t inode_bid;
+  auto cal_free_set_res = operation_->cal_free_set(id, free_set, inode_bid);
+  if(cal_free_set_res.is_err()) {
+    // Error encountered when calculating free set
+    return cal_free_set_res;
+  }
+
+  // free inode first
+  auto res = operation_->inode_manager_->free_inode(id);
+    if (res.is_err()) {
+      error_code = res.unwrap_error();
+      goto err_ret;
+  }
+
+  // free inode block 
+  res = operation_->block_allocator_->deallocate(inode_bid);
+  if(res.is_err()) {
+    error_code = res.unwrap_error();
+    goto err_ret;
+  }
+
+  // free the blocks in free_set (rpc)
+  for (auto mac_block_id : free_set) {
+    // TODO: update mac_id and bid
+    auto mac_id = mac_block_id;
+    auto bid = mac_block_id;
+    auto res = clients_[mac_id]->call("free_block", bid);
+    if (res.is_err()) {
+      error_code = res.unwrap_error();
+      goto err_ret;
+    }
+
+    // TODO: replace this replace statement
+    assert(res.unwrap() -> as<bool>());
+  }
+  return KNullOk;
+
+err_ret:
+  return ChfsNullResult(error_code);
 }
 
 // {Your code here}
 auto MetadataServer::lookup(inode_id_t parent, const std::string &name)
     -> inode_id_t {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
-
-  return 0;
+  auto lookup_res = operation_->lookup(parent, name.c_str());
+  if(lookup_res.is_err()) {
+    return KInvalidInodeID;
+  }
+  return lookup_res.unwrap();
 }
 
 // {Your code here}
 auto MetadataServer::get_block_map(inode_id_t id) -> std::vector<BlockInfo> {
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
 
   return {};
 }

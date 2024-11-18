@@ -19,6 +19,12 @@
 #include "filesystem/operations.h"
 #include "distributed/commit_log.h"
 
+// format: 
+// 32 bits    |     32 bits
+// MAC_ID     |     BLOCK_ID
+// #define MAC_ID(mac_block_id) (static_cast<mac_id_t>((mac_block_id) >> 32))
+// #define BLOCK_ID(mac_block_id) (static_cast<block_id_t>((mac_block_id) & ((1 << 32) - 1)))
+
 namespace chfs {
 
 /**
@@ -117,12 +123,22 @@ public:
    */
   auto unlink(inode_id_t parent, const std::string &name) -> bool;
 
+
+    /**
+   * Remove the file corresponding to an inode. (distributed)
+   *
+   * @param id the id of the inode
+   * @return whether the remove is ok
+   */
+  auto remove_file(inode_id_t) -> ChfsNullResult;
+
+
   /**
    * A RPC handler for client. It looks up the dir and return the inode id of
    * the given name.
    *
    * @param parent: The parent directory of the node to be found.
-   * @param name: The name of the node to be removed.
+   * @param name: The name of the node to be removed. 
    */
   auto lookup(inode_id_t parent, const std::string &name) -> inode_id_t;
 
