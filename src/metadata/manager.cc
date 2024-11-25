@@ -292,6 +292,8 @@ namespace chfs
       return ChfsNullResult(ErrorType::INVALID_ARG);
     }
     bitmap.clear(inode_bitmap_idx);
+    // NOTE: 修改bitmap后需要写回
+    bm->write_block(inode_bitmap_block_id, buffer.data());
 
     return KNullOk;
   }

@@ -276,6 +276,16 @@ auto MetadataServer::remove_file(inode_id_t id) -> ChfsNullResult {
     return cal_free_set_res;
   }
 
+  // 计算block map并释放远程block
+  auto block_map = get_block_map(id);
+  for(auto block_info: block_map) {
+    auto res = clients_[std::get<1>(block_info)]->call("free_block", std::get<0>(block_info));
+    if(res.is_err()) {
+      error_code = res.unwrap_error();
+      return ChfsNullResult(error_code);
+    }
+  }
+
   // free inode first
   auto res = operation_->inode_manager_->free_inode(id);
     if (res.is_err()) {
@@ -684,8 +694,9 @@ auto MetadataServer::readdir(inode_id_t node)
   if(read_res.is_err()) {
     return {};
   }
-
-  auto dir_content = std::string(read_res.unwrap().begin(), read_res.unwrap().end());
+  
+  auto file_content = read_res.unwrap();
+  auto dir_content = std::string(file_content.begin(), file_content.end());
   std::list<DirectoryEntry> dir_entry_list;
   std::vector<std::pair<std::string, inode_id_t>> dir_entry_vec;
   parse_directory(dir_content, dir_entry_list);
