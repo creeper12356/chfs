@@ -2,7 +2,6 @@
 #include "common/util.h"
 #include "filesystem/directory_op.h"
 #include <fstream>
-#include "metadata_server.h"
 
 namespace chfs {
 
@@ -103,6 +102,95 @@ auto MetadataServer::poll_allocate_block(inode_id_t id) -> BlockInfo
 
     return BlockInfo(allocated_block_info.first, client_mapping.first, allocated_block_info.second);
   }
+}
+
+auto MetadataServer::handle_last_direct_block_not_full(BlockInfoStruct *last_direct_block_info_arr, BlockInfoStruct block_info_struct, u8 *last_direct_block_data, block_id_t last_direct_block_id) -> bool
+{
+  // 未满
+  auto next_block_info_idx = 0;
+  while(last_direct_block_info_arr[next_block_info_idx].block_id != KInvalidBlockID) {
+    ++ next_block_info_idx;
+  }
+  // 直接将返回的信息写入到next_block_info_idx对应的位置
+  last_direct_block_info_arr[next_block_info_idx] = block_info_struct;
+  auto write_last_direct_block_res = operation_->block_manager_->write_block(last_direct_block_id, last_direct_block_data);
+  if(write_last_direct_block_res.is_err()) {
+    return false;
+  }
+
+  return true;
+}
+
+auto MetadataServer::handle_last_direct_block_full(BlockInfoStruct block_info_struct, Inode *inode_p, u8* inode_data, block_id_t inode_bid, usize last_direct_block_id_idx,bool need_indirect) -> bool
+{
+  auto block_size = operation_->block_manager_->block_size();
+  auto inode_nblocks = inode_p->get_nblocks();
+
+  // 分配一个新的direct block
+  auto allocate_next_direct_block_res = operation_->block_allocator_->allocate();
+  if(allocate_next_direct_block_res.is_err()) {
+    return false;
+  }
+  auto next_direct_block_id = allocate_next_direct_block_res.unwrap();
+
+  // 写入新的block信息
+  std::vector<u8> next_direct_block(block_size, 0);
+  reinterpret_cast<BlockInfoStruct *>(next_direct_block.data())[0] = block_info_struct;
+  auto write_next_direct_block_res = operation_->block_manager_->write_block(next_direct_block_id, next_direct_block.data());
+  if(write_next_direct_block_res.is_err()) {
+    return false;
+  }
+
+  // if(last_direct_block_id_idx == inode_nblocks - 2) {
+    if(need_indirect) {
+    // inode中所有的direct block对应的空间都已满，需要分配indirect block
+    // 分配next direct block，类似上一种情况的逻辑
+    auto allocate_next_direct_block_res = operation_->block_allocator_->allocate();
+    if(allocate_next_direct_block_res.is_err()) {
+      return false;
+    }
+    auto next_direct_block_id = allocate_next_direct_block_res.unwrap();
+
+    // 写入新的block信息
+    std::vector<u8> next_direct_block(block_size, 0);
+    reinterpret_cast<BlockInfoStruct *>(next_direct_block.data())[0] = block_info_struct;
+    auto write_next_direct_block_res = operation_->block_manager_->write_block(next_direct_block_id, next_direct_block.data());
+    if(write_next_direct_block_res.is_err()) {
+      return false;
+    }
+
+    // 分配一个indirect block
+    auto allocate_indirect_block_res = inode_p->get_or_insert_indirect_block(operation_->block_allocator_);
+    if(allocate_indirect_block_res.is_err()) {
+      return false;
+    }
+    auto indirect_block_id = allocate_indirect_block_res.unwrap();
+
+    // 将next direct block的block id写入到indirect block中
+    std::vector<u8> indirect_block(block_size);
+    reinterpret_cast<block_id_t *>(indirect_block.data())[0] = next_direct_block_id;
+    auto write_indirect_block_res = operation_->block_manager_->write_block(indirect_block_id, indirect_block.data());
+    if(write_indirect_block_res.is_err()) {
+      return false;
+    }
+
+    // 将新分配的indirect block的block id写入到inode中
+    inode_p->blocks[inode_nblocks - 1] = indirect_block_id;
+    auto write_inode_res = operation_->block_manager_->write_block(inode_bid, inode_data);
+    if(write_inode_res.is_err()) {
+      return false;
+    }
+
+  } else {
+    // 写入一个新的direct block中，只需要修改inode中的指针
+    inode_p->blocks[last_direct_block_id_idx + 1] = next_direct_block_id;
+    auto write_inode_res = operation_->block_manager_->write_block(inode_bid, inode_data);
+    if(write_inode_res.is_err()) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 MetadataServer::MetadataServer(u16 port, const std::string &data_path,
@@ -314,47 +402,67 @@ auto MetadataServer::get_block_map(inode_id_t id) -> std::vector<BlockInfo> {
 
 // {Your code here}
 auto MetadataServer::allocate_block(inode_id_t id) -> BlockInfo {
-  for(auto client_mapping: clients_) {
-    // 轮询所有的data server，直到找到一个可以分配的block
-    auto allocated_block_info = client_mapping.second->call("alloc_block").unwrap()->as<std::pair<block_id_t, version_t>>();
-    if(allocated_block_info.first == KInvalidBlockID) {
-      continue;
-    }
+  // 向所有的data server发送请求，分配一个新的block
+  auto poll_allocate_block_info = poll_allocate_block(id);
+  if(std::get<0>(poll_allocate_block_info) == KInvalidBlockID) {
+    return poll_allocate_block_info;
+  }
+  
+  // 便于可读性
+  auto poll_allocate_block_info_struct = BlockInfoStruct {
+    std::get<0>(poll_allocate_block_info),
+    std::get<1>(poll_allocate_block_info),
+    std::get<2>(poll_allocate_block_info)
+  };
 
-    // 修改metadata
+  // 读取inode block
+  auto block_size = operation_->block_manager_->block_size();
+  std::vector<u8> inode(block_size);
+  auto inode_bid_res = operation_->inode_manager_->get(id);
+  if(inode_bid_res.is_err()) {
+    return {};
+  }
+  auto inode_bid = inode_bid_res.unwrap();
+  auto inode_p = reinterpret_cast<Inode *>(inode.data());
+  auto read_inode_res = operation_->block_manager_->read_block(inode_bid, inode.data());
+  if(read_inode_res.is_err()) {
+    return {};
+  }
 
-    // 读取inode block
-    auto block_size = operation_->block_manager_->block_size();
-    std::vector<u8> inode(block_size);
-    auto inode_bid_res = operation_->inode_manager_->get(id);
-    if(inode_bid_res.is_err()) {
-      return {};
+  auto inode_nblocks = inode_p->get_nblocks();
+  // 分成5种情况进行讨论：
+  // - indirect block未使用，最后一个direct block指向的block未满
+  // - indirect block未使用，最后一个direct block指向的block已满，且已经没有direct block可以使用
+  // - indirect block未使用，最后一个direct block指向的block已满，但还有direct block可以使用
+  // - indirect block已使用，indirect block中最后一个direct block指向的block未满
+  // - indirect block已使用，indirect block中最后一个direct block指向的block已满
+  if(inode_p->blocks[inode_nblocks] == KInvalidBlockID) {
+    // indirect block未使用
+    // 读取最后一个direct block
+    bool last_direct_block_full = true;
+    auto last_direct_block_id_idx = 0;
+    while(inode_p->blocks[last_direct_block_id_idx] != KInvalidBlockID) {
+      ++ last_direct_block_id_idx;
     }
-    auto inode_bid = inode_bid_res.unwrap();
-    auto inode_p = reinterpret_cast<Inode *>(inode.data());
-    auto read_inode_res = operation_->block_manager_->read_block(inode_bid, inode.data());
-    if(read_inode_res.is_err()) {
-      return {};
-    }
-
-    // 更新inode的block信息
-    auto inode_nblocks = inode_p->get_nblocks();
-    // 分成5种情况进行讨论：
-    // - indirect block未使用，最后一个direct block指向的block未满
-    // - indirect block未使用，最后一个direct block指向的block已满，且已经没有direct block可以使用
-    // - indirect block未使用，最后一个direct block指向的block已满，但还有direct block可以使用
-    // - indirect block已使用，indirect block中最后一个direct block指向的block未满
-    // - indirect block已使用，indirect block中最后一个direct block指向的block已满
-    if(inode_p->blocks[inode_nblocks] == KInvalidBlockID) {
-      // indirect block未使用
-      // 读取最后一个direct block
-      auto last_direct_block_id_idx = 0;
-      while(inode_p->blocks[last_direct_block_id_idx] != KInvalidBlockID) {
-        ++ last_direct_block_id_idx;
+    -- last_direct_block_id_idx;
+    if(last_direct_block_id_idx == -1) {
+      // 没有direct block可以使用，相当于
+      // 已满的情况，需要分配一个新的direct block
+      auto res = handle_last_direct_block_full(
+        poll_allocate_block_info_struct,
+        inode_p,
+        inode.data(),
+        inode_bid,
+        last_direct_block_id_idx,
+        true
+      );
+      if(!res) {
+        return {};
       }
-      -- last_direct_block_id_idx;
 
-      // TODO: 判断last_direct_block_id_idx是否合法
+    } else {
+      // 读取当前最后一个direct block,
+      // 判断最后一个direct block指向的block是否已满
       auto last_direct_block_id = inode_p->blocks[last_direct_block_id_idx];
       std::vector<u8> last_direct_block(block_size);
       auto read_last_direct_block_res = operation_->block_manager_->read_block(last_direct_block_id, last_direct_block.data());
@@ -362,182 +470,106 @@ auto MetadataServer::allocate_block(inode_id_t id) -> BlockInfo {
         return {};
       }
 
-      // 判断最后一个direct block指向的block是否已满
       auto last_direct_block_info_arr = reinterpret_cast<BlockInfoStruct *>(last_direct_block.data());
       auto last_direct_block_info_arr_size = block_size / sizeof(BlockInfoStruct);
       if(last_direct_block_info_arr[last_direct_block_info_arr_size - 1].block_id == KInvalidBlockID) {
         // 未满
-        auto next_block_info_idx = 0;
-        while(last_direct_block_info_arr[next_block_info_idx].block_id != KInvalidBlockID) {
-          ++ next_block_info_idx;
-        }
-        // 直接将返回的信息写入到next_block_info_idx对应的位置
-        last_direct_block_info_arr[next_block_info_idx] = {
-          allocated_block_info.first,
-          client_mapping.first,
-          allocated_block_info.second
-        };
-        auto write_last_direct_block_res = operation_->block_manager_->write_block(last_direct_block_id, last_direct_block.data());
-        if(write_last_direct_block_res.is_err()) {
+        auto res = handle_last_direct_block_not_full(
+          last_direct_block_info_arr,
+          poll_allocate_block_info_struct,
+          last_direct_block.data(),
+          last_direct_block_id
+        );
+        if(!res) {
           return {};
         }
 
       } else {
         // 已满
-        // 分配一个新的direct block
-        auto allocate_next_direct_block_res = operation_->block_allocator_->allocate();
-        if(allocate_next_direct_block_res.is_err()) {
+        auto res = handle_last_direct_block_full(
+          poll_allocate_block_info_struct,
+          inode_p,
+          inode.data(),
+          inode_bid,
+          last_direct_block_id_idx,
+          last_direct_block_id_idx == inode_nblocks - 2
+        );
+        if(!res) {
           return {};
         }
-        auto next_direct_block_id = allocate_next_direct_block_res.unwrap();
+      }
+    }
+    
+  } else {
+    // indirect block已使用
+    // 读取indirect block
+    std::vector<u8> indirect_block(block_size);
+    auto indirect_block_id = inode_p->get_indirect_block_id();
+    auto read_indirect_block_res = operation_->block_manager_->read_block(indirect_block_id, indirect_block.data());
+    if(read_indirect_block_res.is_err()) {
+      return {};
+    }
 
-        // 写入新的block信息
-        std::vector<u8> next_direct_block(block_size, 0);
-        reinterpret_cast<BlockInfoStruct *>(next_direct_block.data())[0] = {
-          allocated_block_info.first,
-          client_mapping.first,
-          allocated_block_info.second
-        };
-        auto write_next_direct_block_res = operation_->block_manager_->write_block(next_direct_block_id, next_direct_block.data());
-        if(write_next_direct_block_res.is_err()) {
-          return {};
-        }
+    // 在indirect block中找到最后一个使用的direct block
+    auto indirect_block_p = reinterpret_cast<block_id_t *>(indirect_block.data());
+    auto indirect_block_size = block_size / sizeof(block_id_t);
+    auto last_direct_block_id_idx = 0;
+    while(indirect_block_p[last_direct_block_id_idx] != KInvalidBlockID) {
+      ++ last_direct_block_id_idx;
+    }
+    -- last_direct_block_id_idx;
 
-        if(last_direct_block_id_idx == inode_nblocks - 2) {
-          // inode中所有的direct block对应的空间都已满，需要分配indirect block
-          // 分配next direct block，类似上一种情况的逻辑
-          auto allocate_next_direct_block_res = operation_->block_allocator_->allocate();
-          if(allocate_next_direct_block_res.is_err()) {
-            return {};
-          }
-          auto next_direct_block_id = allocate_next_direct_block_res.unwrap();
+    auto last_direct_block_id = indirect_block_p[last_direct_block_id_idx];
+    auto last_direct_block = std::vector<u8>(block_size);
 
-          // 写入新的block信息
-          std::vector<u8> next_direct_block(block_size, 0);
-          reinterpret_cast<BlockInfoStruct *>(next_direct_block.data())[0] = {
-            allocated_block_info.first,
-            client_mapping.first,
-            allocated_block_info.second
-          };
-          auto write_next_direct_block_res = operation_->block_manager_->write_block(next_direct_block_id, next_direct_block.data());
-          if(write_next_direct_block_res.is_err()) {
-            return {};
-          }
-
-          // 分配一个indirect block
-          auto allocate_indirect_block_res = inode_p->get_or_insert_indirect_block(operation_->block_allocator_);
-          if(allocate_indirect_block_res.is_err()) {
-            return {};
-          }
-          auto indirect_block_id = allocate_indirect_block_res.unwrap();
-
-          // 将next direct block的block id写入到indirect block中
-          std::vector<u8> indirect_block(block_size);
-          reinterpret_cast<block_id_t *>(indirect_block.data())[0] = next_direct_block_id;
-          auto write_indirect_block_res = operation_->block_manager_->write_block(indirect_block_id, indirect_block.data());
-          if(write_indirect_block_res.is_err()) {
-            return {};
-          }
-
-          // 将新分配的indirect block的block id写入到inode中
-          inode_p->blocks[inode_nblocks - 1] = indirect_block_id;
-          auto write_inode_res = operation_->block_manager_->write_block(inode_bid, inode.data());
-          if(write_inode_res.is_err()) {
-            return {};
-          }
-
-        } else {
-          // 写入一个新的direct block中，只需要修改inode中的指针
-          inode_p->blocks[last_direct_block_id_idx + 1] = next_direct_block_id;
-          auto write_inode_res = operation_->block_manager_->write_block(inode_bid, inode.data());
-          if(write_inode_res.is_err()) {
-            return {};
-          }
-        }
+    // 判断最后一个direct block指向的block是否已满，
+    // NOTE: 逻辑与direct block部分相同
+    auto last_direct_block_info_arr = reinterpret_cast<BlockInfoStruct *>(last_direct_block.data());
+    auto last_direct_block_info_arr_size = block_size / sizeof(BlockInfoStruct);
+    if(last_direct_block_info_arr[last_direct_block_info_arr_size - 1].block_id == KInvalidBlockID) {
+      auto res = handle_last_direct_block_not_full(
+        last_direct_block_info_arr,
+        poll_allocate_block_info_struct,
+        last_direct_block.data(),
+        last_direct_block_id
+      );
+      if(!res) {
+        return {};
       }
       
     } else {
-      // indirect block已使用
-      // 读取indirect block
-      std::vector<u8> indirect_block(block_size);
-      auto indirect_block_id = inode_p->get_indirect_block_id();
-      auto read_indirect_block_res = operation_->block_manager_->read_block(indirect_block_id, indirect_block.data());
-      if(read_indirect_block_res.is_err()) {
+      // 已满
+      if(last_direct_block_id_idx == indirect_block_size - 1) {
+        // 达到最大文件大小，直接失败
         return {};
       }
 
-      // 在indirect block中找到最后一个使用的direct block
-      auto indirect_block_p = reinterpret_cast<block_id_t *>(indirect_block.data());
-      auto indirect_block_size = block_size / sizeof(block_id_t);
-      auto last_direct_block_id_idx = 0;
-      while(indirect_block_p[last_direct_block_id_idx] != KInvalidBlockID) {
-        ++ last_direct_block_id_idx;
+      // 分配一个新的direct block
+      auto allocate_next_direct_block_res = operation_->block_allocator_->allocate();
+      if(allocate_next_direct_block_res.is_err()) {
+        return {};
       }
-      -- last_direct_block_id_idx;
+      auto next_direct_block_id = allocate_next_direct_block_res.unwrap();
 
-      auto last_direct_block_id = indirect_block_p[last_direct_block_id_idx];
-      auto last_direct_block = std::vector<u8>(block_size);
-
-      // 判断最后一个direct block指向的block是否已满，
-      // NOTE: 逻辑与direct block部分相同
-      auto last_direct_block_info_arr = reinterpret_cast<BlockInfoStruct *>(last_direct_block.data());
-      auto last_direct_block_info_arr_size = block_size / sizeof(BlockInfoStruct);
-      if(last_direct_block_info_arr[last_direct_block_info_arr_size - 1].block_id == KInvalidBlockID) {
-        // 未满
-        auto next_block_info_idx = 0;
-        while(last_direct_block_info_arr[next_block_info_idx].block_id != KInvalidBlockID) {
-          ++ next_block_info_idx;
-        }
-        // 直接将返回的信息写入到next_block_info_idx对应的位置
-        last_direct_block_info_arr[next_block_info_idx] = {
-          allocated_block_info.first,
-          client_mapping.first,
-          allocated_block_info.second
-        };
-        auto write_last_direct_block_res = operation_->block_manager_->write_block(last_direct_block_id, last_direct_block.data());
-        if(write_last_direct_block_res.is_err()) {
-          return {};
-        }
-        
-      } else {
-        // 已满
-        if(last_direct_block_id_idx == indirect_block_size - 1) {
-          // 达到最大文件大小，直接失败
-          return {};
-        }
-
-        // 分配一个新的direct block
-        auto allocate_next_direct_block_res = operation_->block_allocator_->allocate();
-        if(allocate_next_direct_block_res.is_err()) {
-          return {};
-        }
-        auto next_direct_block_id = allocate_next_direct_block_res.unwrap();
-
-        // 写入新的block信息
-        std::vector<u8> next_direct_block(block_size, 0);
-        reinterpret_cast<BlockInfoStruct *>(next_direct_block.data())[0] = {
-          allocated_block_info.first,
-          client_mapping.first,
-          allocated_block_info.second
-        };
-        auto write_next_direct_block_res = operation_->block_manager_->write_block(next_direct_block_id, next_direct_block.data());
-        if(write_next_direct_block_res.is_err()) {
-          return {};
-        }
-
-        // 写入一个新的direct block中，只需要修改indirect block中的指针
-        // NOTE: 上面情况是修改inode中的指针，类似但是不同
-        indirect_block_p[last_direct_block_id_idx + 1] = next_direct_block_id;
-        auto write_indirect_block_res = operation_->block_manager_->write_block(indirect_block_id, indirect_block.data());
-        if(write_indirect_block_res.is_err()) {
-          return {};
-        }
+      // 写入新的block信息
+      std::vector<u8> next_direct_block(block_size, 0);
+      reinterpret_cast<BlockInfoStruct *>(next_direct_block.data())[0] = poll_allocate_block_info_struct;
+      auto write_next_direct_block_res = operation_->block_manager_->write_block(next_direct_block_id, next_direct_block.data());
+      if(write_next_direct_block_res.is_err()) {
+        return {};
       }
 
+      // 写入一个新的direct block中，只需要修改indirect block中的指针
+      // NOTE: 上面情况是修改inode中的指针，类似但是不同
+      indirect_block_p[last_direct_block_id_idx + 1] = next_direct_block_id;
+      auto write_indirect_block_res = operation_->block_manager_->write_block(indirect_block_id, indirect_block.data());
+      if(write_indirect_block_res.is_err()) {
+        return {};
+      }
     }
-    return {allocated_block_info.first, client_mapping.first, allocated_block_info.second};
+
   }
-  return {};
+  return poll_allocate_block_info;
 }
 
 // {Your code here}

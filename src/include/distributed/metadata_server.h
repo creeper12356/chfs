@@ -260,13 +260,21 @@ private:
   /**
    * {You can add anything you want here}
    */
-
+public:
   /**
    * @brief 通过向data server轮询，直到分配一个block
    * @param id inode id
    * @return 分配的block信息
    */
   auto poll_allocate_block(inode_id_t id) -> BlockInfo;
+
+  auto handle_last_direct_block_not_full(BlockInfoStruct *last_direct_block_info_arr, BlockInfoStruct block_info_struct, u8 *last_direct_block_data, block_id_t last_direct_block_id) -> bool;
+
+  /**
+   * @brief 处理最后一个direct block已满的情况
+   * @return 是否成功
+   */
+  auto handle_last_direct_block_full(BlockInfoStruct block_info_struct, Inode *inode_p, u8 *inode_data, block_id_t inode_bid, usize last_direct_block_id_idx, bool need_indirect) -> bool;
 };
 
 } // namespace chfs
