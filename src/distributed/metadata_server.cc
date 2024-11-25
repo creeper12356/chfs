@@ -102,6 +102,8 @@ auto MetadataServer::poll_allocate_block(inode_id_t id) -> BlockInfo
 
     return BlockInfo(allocated_block_info.first, client_mapping.first, allocated_block_info.second);
   }
+
+  return {};
 }
 
 auto MetadataServer::handle_last_direct_block_not_full(BlockInfoStruct *last_direct_block_info_arr, BlockInfoStruct block_info_struct, u8 *last_direct_block_data, block_id_t last_direct_block_id) -> bool
@@ -436,10 +438,9 @@ auto MetadataServer::allocate_block(inode_id_t id) -> BlockInfo {
   // - indirect block未使用，最后一个direct block指向的block已满，但还有direct block可以使用
   // - indirect block已使用，indirect block中最后一个direct block指向的block未满
   // - indirect block已使用，indirect block中最后一个direct block指向的block已满
-  if(inode_p->blocks[inode_nblocks] == KInvalidBlockID) {
+  if(inode_p->blocks[inode_nblocks - 1] == KInvalidBlockID) {
     // indirect block未使用
     // 读取最后一个direct block
-    bool last_direct_block_full = true;
     auto last_direct_block_id_idx = 0;
     while(inode_p->blocks[last_direct_block_id_idx] != KInvalidBlockID) {
       ++ last_direct_block_id_idx;
