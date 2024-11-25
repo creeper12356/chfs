@@ -19,12 +19,6 @@
 #include "filesystem/operations.h"
 #include "distributed/commit_log.h"
 
-// format: 
-// 32 bits    |     32 bits
-// MAC_ID     |     BLOCK_ID
-// #define MAC_ID(mac_block_id) (static_cast<mac_id_t>((mac_block_id) >> 32))
-// #define BLOCK_ID(mac_block_id) (static_cast<block_id_t>((mac_block_id) & ((1 << 32) - 1)))
-
 namespace chfs {
 
 /**

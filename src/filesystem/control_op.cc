@@ -46,6 +46,7 @@ auto FileOperation::get_free_blocks_num() const -> ChfsResult<u64> {
   return ChfsResult<u64>(block_allocator_->free_block_cnt());
 }
 
+// TODO: modify remove_file logic
 auto FileOperation::remove_file(inode_id_t id) -> ChfsNullResult {
   auto error_code = ErrorType::DONE;
   std::vector<block_id_t> free_set;
@@ -55,9 +56,6 @@ auto FileOperation::remove_file(inode_id_t id) -> ChfsNullResult {
     // Error encountered when calculating free set
     return cal_free_set_res;
   }
-
-  // In this function, simply add inode_bid to free_set
-  free_set.push_back(inode_bid);
 
   // free inode first
   auto res = this->inode_manager_->free_inode(id);
@@ -72,6 +70,11 @@ auto FileOperation::remove_file(inode_id_t id) -> ChfsNullResult {
     if (res.is_err()) {
       return res;
     }
+  }
+  // free inode block id
+  res = this->block_allocator_->deallocate(inode_bid);
+  if(res.is_err()) {
+    return res;
   }
   return KNullOk;
 
