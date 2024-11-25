@@ -56,6 +56,11 @@ const u8 RegularFileType = 1;
 const u8 DirectoryType = 2;
 
 using BlockInfo = std::tuple<block_id_t, mac_id_t, version_t>;
+using BlockInfoStruct = struct {
+  block_id_t block_id;
+  mac_id_t mac_id;
+  version_t version;
+};
 
 class MetadataServer {
   const size_t num_worker_threads = 4; // worker threads for rpc handlers
@@ -255,6 +260,13 @@ private:
   /**
    * {You can add anything you want here}
    */
+
+  /**
+   * @brief 通过向data server轮询，直到分配一个block
+   * @param id inode id
+   * @return 分配的block信息
+   */
+  auto poll_allocate_block(inode_id_t id) -> BlockInfo;
 };
 
 } // namespace chfs

@@ -170,7 +170,6 @@ namespace chfs
       -> ChfsResult<inode_id_t>
   {
 
-    // TODO:
     // 1. Check if `name` already exists in the parent.
     //    If already exist, return ErrorType::AlreadyExist.
     auto lookup_res = this->lookup(id, name);
