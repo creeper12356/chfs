@@ -30,7 +30,12 @@ auto ChfsClient::reg_server(ServerType type, const std::string &address,
 auto ChfsClient::mknode(FileType type, inode_id_t parent,
                         const std::string &name) -> ChfsResult<inode_id_t> {
   auto res = metadata_server_->call("mknode", static_cast<u8>(type), parent, name);
-  return res.unwrap()->as<inode_id_t>();
+  auto inode_id = res.unwrap()->as<inode_id_t>();
+  if(inode_id == KInvalidInodeID) {
+    return ChfsResult<inode_id_t>(ErrorType::BadResponse);
+  } else {
+    return ChfsResult<inode_id_t>(inode_id);
+  }
 }
 
 // {Your code here}

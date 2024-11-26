@@ -235,6 +235,22 @@ public:
 
 private:
   /**
+   * @brief 通过向data server轮询，直到分配一个block
+   * @param id inode id
+   * @return 分配的block信息
+   */
+  auto poll_allocate_block(inode_id_t id) -> BlockInfo;
+
+  auto handle_last_direct_block_not_full(BlockInfoStruct *last_direct_block_info_arr, BlockInfoStruct block_info_struct, u8 *last_direct_block_data, block_id_t last_direct_block_id) -> bool;
+
+  /**
+   * @brief 处理最后一个direct block已满的情况
+   * @return 是否成功
+   */
+  auto handle_last_direct_block_full(BlockInfoStruct block_info_struct, Inode *inode_p, u8 *inode_data, block_id_t inode_bid, usize last_direct_block_id_idx, bool need_indirect) -> bool;
+
+private:
+  /**
    * Helper function for binding rpc handlers
    */
   inline auto bind_handlers();
@@ -261,24 +277,17 @@ private:
   bool may_failed_;
   [[maybe_unused]] bool is_checkpoint_enabled_;
 
-  /**
-   * {You can add anything you want here}
-   */
-public:
-  /**
-   * @brief 通过向data server轮询，直到分配一个block
-   * @param id inode id
-   * @return 分配的block信息
-   */
-  auto poll_allocate_block(inode_id_t id) -> BlockInfo;
 
-  auto handle_last_direct_block_not_full(BlockInfoStruct *last_direct_block_info_arr, BlockInfoStruct block_info_struct, u8 *last_direct_block_data, block_id_t last_direct_block_id) -> bool;
+  // handler mutex
+  std::mutex mknode_mtx_;
+  std::mutex unlink_mtx_;
+  std::mutex lookup_mtx_;
+  std::mutex get_block_map_mtx_;
+  std::mutex allocate_block_mtx_;
+  std::mutex free_block_mtx_;
+  std::mutex readdir_mtx_;
+  std::mutex get_type_attr_mtx_;
 
-  /**
-   * @brief 处理最后一个direct block已满的情况
-   * @return 是否成功
-   */
-  auto handle_last_direct_block_full(BlockInfoStruct block_info_struct, Inode *inode_p, u8 *inode_data, block_id_t inode_bid, usize last_direct_block_id_idx, bool need_indirect) -> bool;
 };
 
 } // namespace chfs

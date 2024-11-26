@@ -119,7 +119,7 @@ public:
   /**
    * Get the block size of the device managed by the manager
    */
-  auto block_size() const -> usize { return this->block_sz; }
+  auto block_size() const -> usize { /*NOTE: no lock guard here */ return this->block_sz; }
 
   /**
    * Get the block data pointer of the manager
