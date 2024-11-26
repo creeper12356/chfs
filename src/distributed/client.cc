@@ -75,6 +75,13 @@ auto ChfsClient::get_type_attr(inode_id_t id)
     -> ChfsResult<std::pair<InodeType, FileAttr>> {
   auto res = metadata_server_->call("get_type_attr", id)
     .unwrap()->as<std::tuple<u64, u64, u64, u64, u8>>();
+
+
+  std::cout << "atime: " << std::get<1>(res) << std::endl;
+  std::cout << "mtime: " << std::get<2>(res) << std::endl;
+  std::cout << "ctime: " << std::get<3>(res) << std::endl;
+  std::cout << "size: " << std::get<0>(res) << std::endl;
+
   return std::make_pair(static_cast<InodeType>(std::get<4>(res)), 
                         FileAttr{
                           .atime = std::get<1>(res),
@@ -166,12 +173,14 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
                                             std::get<1>(write_op),
                                             std::vector<u8>(data_cursor, data_cursor + std::get<2>(write_op)));
     if(!res.unwrap()->as<bool>()) {
+      std::cerr << "cannot write to data server" << std::endl;
       return ChfsNullResult(ErrorType::BadResponse);
     }
 
     data_cursor += std::get<2>(write_op);
   }
 
+  std::cout << "client successfully write data" << std::endl;
   return KNullOk;
 }
 

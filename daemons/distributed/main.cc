@@ -121,6 +121,7 @@ void chfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   std::cerr << "Read file from inode " << ino << " at off " << off << " with " << size << std::endl;
   auto attr_res = fs->get_type_attr(ino);
   if (attr_res.is_err()) {
+    std::cerr << "Bad get type attr requests" << std::endl;
     fuse_reply_err(req, -1); // fatal error
     return;
   }
@@ -130,6 +131,9 @@ void chfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   auto st = getattr_helper(std::get<0>(type_attr), attr);
 
   if (off >= st.st_size) {
+    std::cerr << "Bad read requests" << std::endl;
+    std::cerr << "st.st_size: " << st.st_size << std::endl;
+    std::cerr << "off: " << off << std::endl;
     fuse_reply_buf(req, nullptr, 0);
     return;
   }
