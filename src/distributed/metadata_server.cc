@@ -27,6 +27,9 @@ inline auto MetadataServer::bind_handlers() {
   server_->bind("readdir", [this](inode_id_t id) { return this->readdir(id); });
   server_->bind("get_type_attr",
                 [this](inode_id_t id) { return this->get_type_attr(id); });
+  server_->bind("get_block_size", [this]() {
+    return this->operation_->block_manager_->block_size();
+  });
 }
 
 inline auto MetadataServer::init_fs(const std::string &data_path) {
@@ -465,7 +468,7 @@ auto MetadataServer::allocate_block(inode_id_t id) -> BlockInfo {
         inode.data(),
         inode_bid,
         last_direct_block_id_idx,
-        true
+        false
       );
       if(!res) {
         return {};
@@ -728,7 +731,13 @@ auto MetadataServer::get_type_attr(inode_id_t id)
 
   auto inode_p = reinterpret_cast<Inode *>(inode_buffer.data());
   auto inode_attr = inode_p->get_attr();
-  return {inode_attr.size, inode_attr.atime, inode_attr.mtime, inode_attr.ctime, static_cast<u8>(inode_p->get_type())};
+  return std::make_tuple(
+    inode_attr.size,
+    inode_attr.atime,
+    inode_attr.mtime,
+    inode_attr.ctime,
+    static_cast<u8>(inode_p->get_type())
+  );
 }
 
 auto MetadataServer::reg_server(const std::string &address, u16 port,

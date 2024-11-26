@@ -184,6 +184,10 @@ public:
    */
   auto get_type_attr(inode_id_t id) -> std::tuple<u64, u64, u64, u64, u8>;
 
+  auto get_block_size() -> usize {
+    return operation_->block_manager_->block_size();
+  }
+
   /**
    * Register a data server to the metadata server. It'll create a RPC
    * connection between the data server and metadata server. It should be called

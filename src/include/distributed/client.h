@@ -136,6 +136,15 @@ public:
    */
   auto free_file_block(inode_id_t id, block_id_t block_id, mac_id_t mac_id)
       -> ChfsNullResult;
+private:
+    /**
+     * @brief 将宏观的读写请求转化为具体的读写序列
+     * @param offset: 读写的起始位置
+     * @param size: 读写的大小
+     * @param block_size: block的大小
+     * @return 一个元组的vector，每个元组包含三个元素，分别是block_idx, offset, len
+     */
+    auto cal_nonempty_data_sequence(usize offset, usize size, usize block_size) -> std::vector<std::tuple<usize, usize, usize>>;
 
 private:
   std::map<mac_id_t, std::shared_ptr<RpcClient>> data_servers_;
