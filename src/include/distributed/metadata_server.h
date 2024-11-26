@@ -279,14 +279,7 @@ private:
 
 
   // handler mutex
-  std::mutex mknode_mtx_;
-  std::mutex unlink_mtx_;
-  std::mutex lookup_mtx_;
-  std::mutex get_block_map_mtx_;
-  std::mutex allocate_block_mtx_;
-  std::mutex free_block_mtx_;
-  std::mutex readdir_mtx_;
-  std::mutex get_type_attr_mtx_;
+  std::mutex global_lock_;
 
 };
 
