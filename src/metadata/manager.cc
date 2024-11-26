@@ -114,7 +114,10 @@ namespace chfs
         std::vector<u8> inode_block_buffer(bm->block_size());
         auto inode = Inode(type, bm->block_size());
         inode.flush_to_buffer(inode_block_buffer.data());
-        bm->write_block(bid, inode_block_buffer.data());
+        auto write_block_res = bm->write_block(bid, inode_block_buffer.data());
+        if(write_block_res.is_err()) {
+          return ChfsResult<inode_id_t>(res.unwrap_error());
+        }
 
         // 2. Setup the inode table.
         this->set_table(count * bm->block_size() * KBitsPerByte + free_idx.value(), bid);
@@ -293,7 +296,10 @@ namespace chfs
     }
     bitmap.clear(inode_bitmap_idx);
     // NOTE: 修改bitmap后需要写回
-    bm->write_block(inode_bitmap_block_id, buffer.data());
+    auto res = bm->write_block(inode_bitmap_block_id, buffer.data());
+    if(res.is_err()) {
+      return ChfsNullResult(res.unwrap_error());
+    }
 
     return KNullOk;
   }

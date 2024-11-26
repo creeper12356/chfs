@@ -53,6 +53,7 @@ public:
   auto append_log(txn_id_t txn_id,
                   std::vector<std::shared_ptr<BlockOperation>> ops) -> void;
   auto commit_log(txn_id_t txn_id) -> void;
+  auto read_log_ops() const -> std::vector<std::shared_ptr<BlockOperation>>;
   auto checkpoint() -> void;
   auto recover() -> void;
   auto get_log_entry_num() -> usize;
@@ -62,6 +63,9 @@ public:
   /**
    * {Append anything if you need}
    */
+
+private:
+  std::mutex log_mutex_;
 };
 
 } // namespace chfs

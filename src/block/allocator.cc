@@ -133,7 +133,10 @@ auto BlockAllocator::allocate() -> ChfsResult<block_id_t> {
       // 2. Flush the changed bitmap block back to the block manager.
       // 3. Calculate the value of `retval`.
       bitmap.set(res.value());
-      bm->write_block(i + this->bitmap_block_id, buffer.data());
+      auto write_block_res = bm->write_block(i + this->bitmap_block_id, buffer.data());
+      if(write_block_res.is_err()) {
+        return ChfsResult<block_id_t>(write_block_res.unwrap_error());
+      }
       retval = i * bm->block_size() * KBitsPerByte + res.value();
 
       return ChfsResult<block_id_t>(retval);
@@ -168,7 +171,10 @@ auto BlockAllocator::deallocate(block_id_t block_id) -> ChfsNullResult {
     return ChfsNullResult(ErrorType::INVALID_ARG);
   }
   bitmap.clear(bit_idx);
-  this->bm->write_block(block_idx + this->bitmap_block_id, buffer.data()); // :( 忘记写回bitmap block了！
+  auto res = this->bm->write_block(block_idx + this->bitmap_block_id, buffer.data()); // :( 忘记写回bitmap block了！
+  if(res.is_err()) {
+    return ChfsNullResult(res.unwrap_error());
+  }
 
   return KNullOk;
 }

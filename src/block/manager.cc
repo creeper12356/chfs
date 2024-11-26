@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "block/manager.h"
+#include "distributed/commit_log.h"
 
 namespace chfs {
 
@@ -81,8 +82,34 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt,
     : file_name_(file), block_cnt(block_cnt), in_memory(false) {
   this->write_fail_cnt = 0;
   this->maybe_failed = false;
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+
+  this->fd = open(file.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+  CHFS_ASSERT(this->fd != -1, "Failed to open the block manager file");
+
+  auto file_sz = get_file_sz(this->file_name_);
+  if (file_sz == 0) {
+    initialize_file(this->fd, this->total_storage_sz());
+  } else {
+    this->block_cnt = file_sz / this->block_sz;
+    CHFS_ASSERT(this->total_storage_sz() == KDefaultBlockCnt * this->block_sz,
+                "The file size mismatches");
+  }
+
+  this->block_data =
+      static_cast<u8 *>(mmap(nullptr, this->total_storage_sz(),
+                             PROT_READ | PROT_WRITE, MAP_SHARED, this->fd, 0));
+  CHFS_ASSERT(this->block_data != MAP_FAILED, "Failed to mmap the data");
+
+  if (is_log_enabled) {
+    // 预留最后的1024个block用于存储log
+    // 上层调用者不可见
+    CHFS_ASSERT(this->block_cnt >= 1024, "Block count is too small");
+    this->block_cnt -= 1024;
+    
+    // 初始化log头部4byte表示log的长度为0
+    memset(this->block_data + this->block_cnt * this->block_sz, 0, sizeof(u32));
+  }
+  
 }
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
@@ -94,7 +121,6 @@ auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     }
   }
 
-  // TODO: Implement this function.
   if (!data) {
     return ChfsNullResult(ErrorType::INVALID_ARG);
   }
@@ -117,7 +143,6 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
     }
   }
 
-  // TODO: Implement this function.
   if (!data) {
     return ChfsNullResult(ErrorType::INVALID_ARG);
   }
