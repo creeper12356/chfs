@@ -101,11 +101,29 @@ auto CommitLog::checkpoint() -> void {
 
 // {Your code here}
 auto CommitLog::recover() -> void {
+  recover_with_ret();
+}
+
+auto CommitLog::recover_with_ret() -> bool {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+
   auto ops = read_log_ops();
 
   // 重放日志
   for(auto &op: ops) {
-    bm_->write_block(op->block_id_, op->new_block_state_.data());
+    auto res = bm_->write_block(op->block_id_, op->new_block_state_.data());
+    if(res.is_err()) {
+      return false;
+    }
   }
+
+  return true;
+}
+
+auto CommitLog::clean() -> void {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+
+  auto log_head_ptr = bm_->get_log_head_ptr();
+  reinterpret_cast<u32 *>(log_head_ptr)[0] = 0;
 }
 }; // namespace chfs

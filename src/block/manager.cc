@@ -114,6 +114,17 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt,
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     -> ChfsNullResult {
+  if (log_enabled) {
+    // 如果启用日志，那么所有的写操作都会被记录到日志中
+    CHFS_ASSERT(this->commit_log != nullptr, "Log is enabled but no log");
+    auto ops = std::vector<std::shared_ptr<BlockOperation>>();
+    ops.push_back(std::make_shared<BlockOperation>(block_id, std::vector<u8>(data, data + this->block_sz)));
+
+    commit_log->append_log(cur_txn_id, ops);
+    return KNullOk;
+  }
+  // 未启用日志，正常写入
+
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
@@ -136,6 +147,21 @@ auto BlockManager::write_block(block_id_t block_id, const u8 *data)
 auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
                                        usize offset, usize len)
     -> ChfsNullResult {
+  if (log_enabled) {
+    // 如果启用日志，那么所有的写操作都会被记录到日志中
+    // NOTE: 在启用日志时，无法部分写入，需要读出block，修改后写入
+    CHFS_ASSERT(this->commit_log != nullptr, "Log is enabled but no log");
+    auto ops = std::vector<std::shared_ptr<BlockOperation>>();
+    auto block_buffer = std::vector<u8>(this->block_sz);
+    memcpy(block_buffer.data(), this->block_data + block_id * this->block_sz, this->block_sz);
+    memcpy(block_buffer.data() + offset, data, len);
+    ops.push_back(std::make_shared<BlockOperation>(block_id, block_buffer));
+
+    commit_log->append_log(cur_txn_id, ops);
+    return KNullOk;
+  }
+
+  // 未启用日志，正常写入
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
@@ -160,6 +186,19 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
 
 auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
 
+  if(log_enabled) {
+    CHFS_ASSERT(commit_log, "Log is enabled but no log");
+    auto ops = commit_log->read_log_ops();
+    // 如果日志中存在对应的block_id的操作，那么直接读取新的block state
+    // NOTE: 可能优化，将日志结构化存储到内存，减少每次读取的时间
+    for(auto &op: ops) {
+      if(op->block_id_ == block_id) {
+        memcpy(data, op->new_block_state_.data(), this->block_sz);
+        return KNullOk;
+      }
+    }
+  }
+
   if (block_id >= this->block_cnt) {
     return ChfsNullResult(ErrorType::INVALID_ARG);
   }
@@ -168,7 +207,13 @@ auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
 }
 
 auto BlockManager::zero_block(block_id_t block_id) -> ChfsNullResult {
-
+  if(log_enabled) {
+    CHFS_ASSERT(commit_log, "Log is enabled but no log");
+    auto ops = std::vector<std::shared_ptr<BlockOperation>>();
+    ops.push_back(std::make_shared<BlockOperation>(block_id, std::vector<u8>(this->block_sz, 0)));
+    commit_log->append_log(cur_txn_id, ops);
+    return KNullOk;
+  }
   if (block_id >= this->block_cnt) {
     return ChfsNullResult(ErrorType::INVALID_ARG);
   }

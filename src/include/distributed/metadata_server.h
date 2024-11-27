@@ -113,6 +113,9 @@ public:
   auto mknode(u8 type, inode_id_t parent, const std::string &name)
       -> inode_id_t;
 
+  auto mknode_atomic(u8 type, inode_id_t parent, const std::string &name)
+      -> inode_id_t;
+
   /**
    * A RPC handler for client. It deletes an file on metadata server from its
    * parent.
@@ -121,6 +124,8 @@ public:
    * @param name: The name of the file to be deleted.
    */
   auto unlink(inode_id_t parent, const std::string &name) -> bool;
+
+  auto unlink_atomic(inode_id_t parent, const std::string &name) -> bool;
 
 
     /**

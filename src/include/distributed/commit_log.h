@@ -56,7 +56,10 @@ public:
   auto read_log_ops() const -> std::vector<std::shared_ptr<BlockOperation>>;
   auto checkpoint() -> void;
   auto recover() -> void;
+  auto recover_with_ret() -> bool;
   auto get_log_entry_num() -> usize;
+
+  auto clean() -> void;
 
   bool is_checkpoint_enabled_;
   std::shared_ptr<BlockManager> bm_;

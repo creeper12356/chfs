@@ -232,20 +232,62 @@ auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
     -> inode_id_t {
   std::lock_guard<std::mutex> lock(global_lock_);
 
-  auto mk_res = operation_->mk_helper(parent, name.c_str(), static_cast<InodeType>(type));
-  if(mk_res.is_err()) {
-    return KInvalidInodeID;
+  if(is_log_enabled_) {
+    operation_->block_manager_->set_log_enabled(true);
+    operation_->block_manager_->set_txn_id(operation_->block_manager_->get_txn_id() + 1);
   }
 
-  return mk_res.unwrap();
+  auto res = mknode_atomic(type, parent, name);
+
+  if(is_log_enabled_) {
+    operation_->block_manager_->set_log_enabled(false);
+    auto recover_res = commit_log->recover_with_ret();
+    if(recover_res) {
+      // 只有成功落盘之后才清空日志
+      commit_log->clean();
+    } else {
+      res = KInvalidInodeID;
+    }
+  }
+
+  return res;
 }
 
+
+auto MetadataServer::mknode_atomic(u8 type, inode_id_t parent, const std::string &name) 
+    -> inode_id_t {
+  auto mk_res = operation_->mk_helper(parent, name.c_str(), static_cast<InodeType>(type));
+  auto res = mk_res.is_err() ? KInvalidInodeID : mk_res.unwrap();
+  return res;
+}
 // {Your code here}
 auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
     -> bool {
     std::lock_guard<std::mutex> lock(global_lock_);
 
-    // NOTE: logic similar to FileOperation::unlink, but different
+    if(is_log_enabled_) {
+      operation_->block_manager_->set_log_enabled(true);
+      operation_->block_manager_->set_txn_id(operation_->block_manager_->get_txn_id() + 1);
+    }
+
+    auto res = unlink_atomic(parent, name);
+
+    if(is_log_enabled_) {
+      operation_->block_manager_->set_log_enabled(false);
+      auto recover_res = commit_log->recover_with_ret();
+      if(recover_res) {
+        // 只有成功落盘之后才清空日志
+        commit_log->clean();
+      } else {
+        res = KInvalidInodeID;
+      }
+    }
+
+    return res;
+}
+
+auto MetadataServer::unlink_atomic(inode_id_t parent, const std::string &name) -> bool {
+   // NOTE: logic similar to FileOperation::unlink, but different
     // 1. Remove the file, you can use the function `remove_file`
     auto child = lookup(parent, name);
     if (child == KInvalidInodeID)
