@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "block/manager.h"
+#include "distributed/commit_log.h"
 
 namespace chfs {
 
@@ -76,26 +77,69 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt)
   CHFS_ASSERT(this->block_data != MAP_FAILED, "Failed to mmap the data");
 }
 
-BlockManager::BlockManager(const std::string &file, usize block_cnt, bool is_log_enabled)
+BlockManager::BlockManager(const std::string &file, usize block_cnt,
+                           bool is_log_enabled)
     : file_name_(file), block_cnt(block_cnt), in_memory(false) {
   this->write_fail_cnt = 0;
   this->maybe_failed = false;
-  // TODO: Implement this function.
-  UNIMPLEMENTED();    
+
+  this->fd = open(file.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+  CHFS_ASSERT(this->fd != -1, "Failed to open the block manager file");
+
+  auto file_sz = get_file_sz(this->file_name_);
+  if (file_sz == 0) {
+    initialize_file(this->fd, this->total_storage_sz());
+  } else {
+    this->block_cnt = file_sz / this->block_sz;
+    CHFS_ASSERT(this->total_storage_sz() == KDefaultBlockCnt * this->block_sz,
+                "The file size mismatches");
+  }
+
+  this->block_data =
+      static_cast<u8 *>(mmap(nullptr, this->total_storage_sz(),
+                             PROT_READ | PROT_WRITE, MAP_SHARED, this->fd, 0));
+  CHFS_ASSERT(this->block_data != MAP_FAILED, "Failed to mmap the data");
+
+  if (is_log_enabled) {
+    // 预留最后的1024个block用于存储log
+    // 上层调用者不可见
+    CHFS_ASSERT(this->block_cnt >= 1024, "Block count is too small");
+    this->block_cnt -= 1024;
+    
+    // 初始化log头部4byte表示log的长度为0
+    memset(this->block_data + this->block_cnt * this->block_sz, 0, sizeof(u32));
+  }
+  
 }
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     -> ChfsNullResult {
+  if (log_enabled) {
+    // 如果启用日志，那么所有的写操作都会被记录到日志中
+    CHFS_ASSERT(this->commit_log != nullptr, "Log is enabled but no log");
+    auto ops = std::vector<std::shared_ptr<BlockOperation>>();
+    ops.push_back(std::make_shared<BlockOperation>(block_id, std::vector<u8>(data, data + this->block_sz)));
+
+    commit_log->append_log(cur_txn_id, ops);
+    return KNullOk;
+  }
+  // 未启用日志，正常写入
+
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
       return ErrorType::INVALID;
     }
   }
-  
 
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (!data) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  if (block_id >= this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+
+  memcpy(this->block_data + block_id * this->block_sz, data, this->block_sz);
   this->write_fail_cnt++;
   return KNullOk;
 }
@@ -103,6 +147,21 @@ auto BlockManager::write_block(block_id_t block_id, const u8 *data)
 auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
                                        usize offset, usize len)
     -> ChfsNullResult {
+  if (log_enabled) {
+    // 如果启用日志，那么所有的写操作都会被记录到日志中
+    // NOTE: 在启用日志时，无法部分写入，需要读出block，修改后写入
+    CHFS_ASSERT(this->commit_log != nullptr, "Log is enabled but no log");
+    auto ops = std::vector<std::shared_ptr<BlockOperation>>();
+    auto block_buffer = std::vector<u8>(this->block_sz);
+    memcpy(block_buffer.data(), this->block_data + block_id * this->block_sz, this->block_sz);
+    memcpy(block_buffer.data() + offset, data, len);
+    ops.push_back(std::make_shared<BlockOperation>(block_id, block_buffer));
+
+    commit_log->append_log(cur_txn_id, ops);
+    return KNullOk;
+  }
+
+  // 未启用日志，正常写入
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
@@ -110,24 +169,55 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
     }
   }
 
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (!data) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  if (block_id >= this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  if (offset + len > this->block_sz) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+
+  memcpy(this->block_data + block_id * this->block_sz + offset, data, len);
   this->write_fail_cnt++;
   return KNullOk;
 }
 
 auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
 
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if(log_enabled) {
+    CHFS_ASSERT(commit_log, "Log is enabled but no log");
+    auto ops = commit_log->read_log_ops();
+    // 如果日志中存在对应的block_id的操作，那么直接读取新的block state
+    // NOTE: 可能优化，将日志结构化存储到内存，减少每次读取的时间
+    for(auto &op: ops) {
+      if(op->block_id_ == block_id) {
+        memcpy(data, op->new_block_state_.data(), this->block_sz);
+        return KNullOk;
+      }
+    }
+  }
 
-  return KNullOk;
+  if (block_id >= this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  memcpy(data, this->block_data + block_id * this->block_sz, this->block_sz);
+  return ChfsNullResult(KNullOk);
 }
 
 auto BlockManager::zero_block(block_id_t block_id) -> ChfsNullResult {
-  
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if(log_enabled) {
+    CHFS_ASSERT(commit_log, "Log is enabled but no log");
+    auto ops = std::vector<std::shared_ptr<BlockOperation>>();
+    ops.push_back(std::make_shared<BlockOperation>(block_id, std::vector<u8>(this->block_sz, 0)));
+    commit_log->append_log(cur_txn_id, ops);
+    return KNullOk;
+  }
+  if (block_id >= this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  memset(this->block_data + block_id * this->block_sz, 0, this->block_sz);
 
   return KNullOk;
 }
@@ -138,14 +228,15 @@ auto BlockManager::sync(block_id_t block_id) -> ChfsNullResult {
   }
 
   auto res = msync(this->block_data + block_id * this->block_sz, this->block_sz,
-        MS_SYNC | MS_INVALIDATE);
+                   MS_SYNC | MS_INVALIDATE);
   if (res != 0)
     return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;
 }
 
 auto BlockManager::flush() -> ChfsNullResult {
-  auto res = msync(this->block_data, this->block_sz * this->block_cnt, MS_SYNC | MS_INVALIDATE);
+  auto res = msync(this->block_data, this->block_sz * this->block_cnt,
+                   MS_SYNC | MS_INVALIDATE);
   if (res != 0)
     return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;

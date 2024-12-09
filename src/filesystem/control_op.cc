@@ -46,13 +46,47 @@ auto FileOperation::get_free_blocks_num() const -> ChfsResult<u64> {
   return ChfsResult<u64>(block_allocator_->free_block_cnt());
 }
 
+// TODO: modify remove_file logic
 auto FileOperation::remove_file(inode_id_t id) -> ChfsNullResult {
+  auto error_code = ErrorType::DONE;
+  std::vector<block_id_t> free_set;
+  block_id_t inode_bid;
+  auto cal_free_set_res = cal_free_set(id, free_set, inode_bid);
+  if(cal_free_set_res.is_err()) {
+    // Error encountered when calculating free set
+    return cal_free_set_res;
+  }
+
+  // free inode first
+  auto res = this->inode_manager_->free_inode(id);
+    if (res.is_err()) {
+      error_code = res.unwrap_error();
+      goto err_ret;
+  }
+
+  // free the blocks in free_set
+  for (auto bid : free_set) {
+    auto res = this->block_allocator_->deallocate(bid);
+    if (res.is_err()) {
+      return res;
+    }
+  }
+  // free inode block id
+  res = this->block_allocator_->deallocate(inode_bid);
+  if(res.is_err()) {
+    return res;
+  }
+  return KNullOk;
+
+err_ret:
+  return ChfsNullResult(error_code);
+}
+
+auto FileOperation::cal_free_set(inode_id_t id, std::vector<block_id_t> &free_set, block_id_t& free_inode_bid) -> ChfsNullResult {
   auto error_code = ErrorType::DONE;
   const auto block_size = this->block_manager_->block_size();
 
   std::vector<u8> inode(block_size);
-
-  std::vector<block_id_t> free_set;
 
   auto inode_p = reinterpret_cast<Inode *>(inode.data());
   auto inode_res = this->inode_manager_->read_inode(id, inode);
@@ -61,6 +95,7 @@ auto FileOperation::remove_file(inode_id_t id) -> ChfsNullResult {
     // I know goto is bad, but we have no choice
     goto err_ret;
   }
+  free_inode_bid = inode_res.unwrap();
 
   for (uint i = 0; i < inode_p->get_direct_block_num(); ++i) {
     if (inode_p->blocks[i] == KInvalidBlockID) {
@@ -88,24 +123,6 @@ auto FileOperation::remove_file(inode_id_t id) -> ChfsNullResult {
       } else {
         free_set.push_back(block_p[i]);
       }
-    }
-  }
-
-  // First we free the inode
-  {
-    auto res = this->inode_manager_->free_inode(id);
-    if (res.is_err()) {
-      error_code = res.unwrap_error();
-      goto err_ret;
-    }
-    free_set.push_back(inode_res.unwrap());
-  }
-
-  // now free the blocks
-  for (auto bid : free_set) {
-    auto res = this->block_allocator_->deallocate(bid);
-    if (res.is_err()) {
-      return res;
     }
   }
   return KNullOk;

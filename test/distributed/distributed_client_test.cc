@@ -87,6 +87,27 @@ TEST_F(DistributedClientTest, WriteAndThenRead) {
   EXPECT_EQ(read_res.unwrap(), data);
 }
 
+TEST_F(DistributedClientTest, WriteAndThenRead2) {
+  auto inode = client->mknode(ChfsClient::FileType::REGULAR, 1, "test_file");
+  EXPECT_EQ(inode.is_ok(), true);
+  auto inode_id = inode.unwrap();
+  ASSERT_EQ(inode_id, 2);
+
+  std::vector<u8> data;
+  for(int i = 0;i < 200;++i) {
+    data.push_back('a' + rand() % 26);
+  }
+
+  std::cout << "data: " << std::string(data.begin(), data.end()) << std::endl;
+
+  auto write_res = client->write_file(inode_id, 0, data);
+  EXPECT_EQ(write_res.is_ok(), true);
+
+  auto read_res = client->read_file(inode_id, 0, data.size());
+  EXPECT_EQ(read_res.is_ok(), true);
+  EXPECT_EQ(read_res.unwrap(), data);
+}
+
 TEST_F(DistributedClientTest, CreateConcurrent) {
   auto client2 = std::make_shared<ChfsClient>();
   client2->reg_server(ChfsClient::ServerType::METADATA_SERVER, "127.0.0.1",

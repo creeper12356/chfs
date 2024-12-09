@@ -131,6 +131,14 @@ public:
   auto remove_file(inode_id_t) -> ChfsNullResult;
 
   /**
+   * Called before removing a file
+   * @param id the id of the inode
+   * @param free_set output of block ids to be freed
+   * @param free_inode_bid output of block id of inode itself to be freed
+   */
+  auto cal_free_set(inode_id_t, std::vector<block_id_t> &, block_id_t &) -> ChfsNullResult;
+
+  /**
    * Get the free blocks of the filesystem.
    * Will read the block bitmap of the underlying filesystem
    */

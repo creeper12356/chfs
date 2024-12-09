@@ -17,10 +17,12 @@
 #include "common/macros.h"
 #include "common/result.h"
 
+
 namespace chfs {
 // TODO
 
 class BlockIterator;
+class CommitLog;
 
 /**
  * BlockManager implements a block device to read/write block devices
@@ -39,6 +41,10 @@ protected:
   bool in_memory; // whether we use in-memory to emulate the block manager
   bool maybe_failed;
   usize write_fail_cnt;
+
+  bool log_enabled = false;
+  CommitLog *commit_log = nullptr;
+  txn_id_t cur_txn_id = 0;
 
 public:
   /**
@@ -119,7 +125,7 @@ public:
   /**
    * Get the block size of the device managed by the manager
    */
-  auto block_size() const -> usize { return this->block_sz; }
+  auto block_size() const -> usize { /*NOTE: no lock guard here */ return this->block_sz; }
 
   /**
    * Get the block data pointer of the manager
@@ -142,6 +148,27 @@ public:
   auto set_may_fail(bool may_fail) -> void {
     this->maybe_failed = may_fail;
   }
+
+  /**
+   * @brief 提供外界读写日志的低级接口
+   * NOTE: 要求启用日志功能
+   */
+  auto get_log_head_ptr() -> u8 * {
+    return this->block_data + this->block_cnt * this->block_sz;
+  }
+
+  auto set_log_enabled(bool is_enabled) -> void {
+    this->log_enabled = is_enabled;
+  }
+
+  auto set_commit_log(CommitLog *log) -> void {
+    this->commit_log = log;
+  }
+
+  auto set_txn_id(txn_id_t txn_id) -> void { this->cur_txn_id = txn_id; }
+
+  auto get_txn_id() const -> txn_id_t { return this->cur_txn_id; }
+
 };
 
 /**
