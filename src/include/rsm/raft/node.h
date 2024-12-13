@@ -121,6 +121,12 @@ private:
 
     std::mutex mtx;                             /* A big lock to protect the whole data structure. */
     std::mutex clients_mtx;                     /* A lock to protect RpcClient pointers */
+    std::mutex current_term_mtx;
+    std::mutex vote_count_mtx;
+    std::mutex role_mtx;
+    std::mutex voted_for_mtx;
+    std::mutex leader_id_mtx;
+
     std::unique_ptr<ThreadPool> thread_pool;
     std::unique_ptr<RaftLog<Command>> log_storage;     /* To persist the raft log. */
     std::unique_ptr<StateMachine> state;  /*  The state machine that applies the raft log, e.g. a kv store. */
@@ -132,9 +138,9 @@ private:
 
     std::atomic_bool stopped;
 
-    RaftRole role;
-    int current_term;
-    int leader_id;
+    RaftRole role; // need mutex lock
+    int current_term; // need mutex lock
+    int leader_id; // need mutex lock
 
     std::unique_ptr<std::thread> background_election;
     std::unique_ptr<std::thread> background_ping;
@@ -142,6 +148,14 @@ private:
     std::unique_ptr<std::thread> background_apply;
 
     /* Lab3: Your code here */
+    int voted_for = -1; // need mutex lock
+
+    int commit_index = 0;
+    int last_applied = 0;
+
+    int vote_count = 0; // need mutex lock
+
+    std::atomic<std::chrono::time_point<std::chrono::system_clock>> last_heartbeat_time = std::chrono::system_clock::now();
 };
 
 template <typename StateMachine, typename Command>
@@ -172,7 +186,13 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
     rpc_server->bind(RAFT_RPC_APPEND_ENTRY, [this](RpcAppendEntriesArgs arg) { return this->append_entries(arg); });
     rpc_server->bind(RAFT_RPC_INSTALL_SNAPSHOT, [this](InstallSnapshotArgs arg) { return this->install_snapshot(arg); });
 
-   /* Lab3: Your code here */ 
+    /* Lab3: Your code here */ 
+    // TODO: do not hardcoded the thread number
+    thread_pool = std::make_unique<ThreadPool>(100);
+
+    for(auto &config: node_configs) {
+        rpc_clients_map[config.node_id] = std::make_unique<RpcClient>(config.ip_address, config.port, true);
+    }
 
 
     rpc_server->run(true, configs.size()); 
@@ -200,6 +220,7 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::start() -> int
 {
     /* Lab3: Your code here */
+    stopped = false;
 
     background_election = std::make_unique<std::thread>(&RaftNode::run_background_election, this);
     background_ping = std::make_unique<std::thread>(&RaftNode::run_background_ping, this);
@@ -213,6 +234,11 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::stop() -> int
 {
     /* Lab3: Your code here */
+    stopped = true;
+    background_election->join();
+    background_ping->join();
+    background_commit->join();
+    background_apply->join();
     return 0;
 }
 
@@ -220,7 +246,9 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::is_leader() -> std::tuple<bool, int>
 {
     /* Lab3: Your code here */
-    return std::make_tuple(false, -1);
+    std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
+    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    return std::make_tuple(leader_id == my_id, current_term);
 }
 
 template <typename StateMachine, typename Command>
@@ -261,28 +289,112 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> RequestVoteReply
 {
     /* Lab3: Your code here */
-    return RequestVoteReply();
+    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    std::lock_guard<std::mutex> role_lock(role_mtx);
+
+    if(args.term < current_term) {
+        RAFT_LOG("req_vote\tterm too old");
+        return RequestVoteReply{current_term, false};
+    }
+    if(args.term > current_term) {
+        current_term = args.term;
+        role = RaftRole::Follower;
+    }
+
+    std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
+
+    if(voted_for == -1 || voted_for == args.candidate_id) {
+        RAFT_LOG("req_vote\tvote granted for %d", args.candidate_id);
+        last_heartbeat_time = std::chrono::system_clock::now();
+        voted_for = args.candidate_id;
+        // TODO: 判断candidate的LOG是否比自己新
+        return RequestVoteReply{current_term, true};
+    }
+    RAFT_LOG("req_vote\tvote denied. voted_for %d, args.candidate_id %d", voted_for, args.candidate_id);
+    return RequestVoteReply{current_term, false};
 }
 
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, const RequestVoteArgs arg, const RequestVoteReply reply)
 {
-    /* Lab3: Your code here */
-    return;
+    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    std::lock_guard<std::mutex> role_lock(role_mtx);
+
+    if(reply.term > current_term) {
+        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
+
+        current_term = reply.term;
+        role = RaftRole::Follower;
+        voted_for = -1;
+        return ;
+    }
+
+    // 收集投票结果
+    if(role == RaftRole::Candidate && reply.vote_granted) {
+        std::lock_guard<std::mutex> vote_count_lock(vote_count_mtx);
+        std::lock_guard<std::mutex> clients_lock(clients_mtx);
+
+        ++ vote_count;
+        if(vote_count > rpc_clients_map.size() / 2) {
+            RAFT_LOG("hdl_req_vote\tbecome leader");
+            role = RaftRole::Leader;
+            std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
+            leader_id = my_id;
+        }
+    }
 }
 
 template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_arg) -> AppendEntriesReply
 {
     /* Lab3: Your code here */
-    return AppendEntriesReply();
+    // NOTE: 暂时只实现heartbeat
+    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    
+    // RAFT_LOG("app_ent\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    if(rpc_arg.term < current_term) {
+        RAFT_LOG("app_ent\tterm too old");
+        RAFT_LOG("app_ent\tcurrent_term %d, rpc_arg.term %d", current_term, rpc_arg.term);
+        return AppendEntriesReply{current_term, false};
+    }
+
+    RAFT_LOG("app_ent\trcv heartbeat");
+    std::lock_guard<std::mutex> role_lock(role_mtx);
+    if(role == RaftRole::Follower) {
+        last_heartbeat_time = std::chrono::system_clock::now();
+        if(rpc_arg.term > current_term) {
+            current_term = rpc_arg.term;
+        }
+    } else if(role == RaftRole::Candidate) {
+        last_heartbeat_time = std::chrono::system_clock::now();
+        role = RaftRole::Follower;
+        if(rpc_arg.term > current_term) {
+            current_term = rpc_arg.term;
+        }
+    } else {
+        // RaftNode::Leader
+        last_heartbeat_time = std::chrono::system_clock::now();
+        // 断言只有一个leader
+        assert(rpc_arg.leader_id == my_id);
+        assert(rpc_arg.term == current_term);
+    }
+
+    // TODO: modify this
+    return AppendEntriesReply{current_term, true};
+
 }
 
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, const AppendEntriesArgs<Command> arg, const AppendEntriesReply reply)
 {
     /* Lab3: Your code here */
-    return;
+    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    if(reply.term > current_term) {
+        std::lock_guard<std::mutex> role_lock(role_mtx);
+        role = RaftRole::Follower;
+        current_term = reply.term;
+        return;
+    }
 }
 
 
@@ -316,6 +428,9 @@ void RaftNode<StateMachine, Command>::send_request_vote(int target_id, RequestVo
         handle_request_vote_reply(target_id, arg, res.unwrap()->as<RequestVoteReply>());
     } else {
         // RPC fails
+        // NOTE: 暂时
+        RAFT_LOG("send_req_vote\trpc fails");
+        assert(0);
     }
 }
 
@@ -335,6 +450,9 @@ void RaftNode<StateMachine, Command>::send_append_entries(int target_id, AppendE
         handle_append_entries_reply(target_id, arg, res.unwrap()->as<AppendEntriesReply>());
     } else {
         // RPC fails
+        // NOTE: 暂时
+        RAFT_LOG("send_app_ent\trpc fails");
+        assert(0);
     }
 }
 
@@ -370,14 +488,63 @@ void RaftNode<StateMachine, Command>::run_background_election() {
     // Work for followers and candidates.
 
     /* Uncomment following code when you finish */
-    // while (true) {
-    //     {
-    //         if (is_stopped()) {
-    //             return;
-    //         }
-    //         /* Lab3: Your code here */
-    //     }
-    // }
+    while (true) {
+        {
+            // RAFT_LOG("bg_ele\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+            if (is_stopped()) {
+                return;
+            }
+            /* Lab3: Your code here */
+            // 使用随机的选举超时时间
+            int election_timeout = RandomNumberGenerator().rand(300, 500);
+            RAFT_LOG("bg_ele\ttimeout %d", election_timeout);
+            std::this_thread::sleep_for(std::chrono::milliseconds(election_timeout));
+            if(last_heartbeat_time + std::chrono::milliseconds(election_timeout) < std::chrono::system_clock::now()) {
+                // 收到leader心跳超时，发起选举
+                RAFT_LOG("bg_ele\telection start");
+                RequestVoteArgs request_vote_args;
+                {
+                    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+                    std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
+                    ++ current_term;
+                    leader_id = -1;
+                    {
+                        std::lock_guard<std::mutex> role_lock(role_mtx);
+                        role = RaftRole::Candidate;
+                    }
+                    request_vote_args.term = current_term;
+                }
+                request_vote_args.candidate_id = my_id;
+                // TODO: 修改这两个参数
+                request_vote_args.last_log_index = 0;
+                request_vote_args.last_log_term = 0;
+
+                std::vector<std::future<void>> futures;
+                for(auto &pair: rpc_clients_map) {
+                    futures.push_back(thread_pool->enqueue(&RaftNode::send_request_vote, this, pair.first, request_vote_args));
+                }
+
+                // 等待投票结果
+                for(auto &future: futures) {
+                    future.get();
+                }
+
+                {
+                    std::lock_guard<std::mutex> role_lock(role_mtx);
+                    std::lock_guard<std::mutex> vote_count_lock(vote_count_mtx);
+                    if(role == RaftRole::Candidate) {
+                        // 选举失败
+                        RAFT_LOG("bg_ele\telection not success");
+                        role = RaftRole::Follower;
+                    } else {
+                        RAFT_LOG("bg_ele\telection success");
+                    }
+                    vote_count = 0;
+                }
+            }
+            
+        }
+    }
     return;
 }
 
@@ -426,14 +593,28 @@ void RaftNode<StateMachine, Command>::run_background_ping() {
     // Only work for the leader.
 
     /* Uncomment following code when you finish */
-    // while (true) {
-    //     {
-    //         if (is_stopped()) {
-    //             return;
-    //         }
-    //         /* Lab3: Your code here */
-    //     }
-    // }
+    while (true) {
+        {
+            if (is_stopped()) {
+                return;
+            }
+            /* Lab3: Your code here */
+            {
+                std::lock_guard<std::mutex> role_lock(role_mtx);
+                if(role == RaftRole::Leader) {
+                    RAFT_LOG("bg_ping\tping...");
+                    AppendEntriesArgs<Command> append_entries_args;
+                    append_entries_args.term = current_term;
+                    append_entries_args.leader_id = my_id;
+                    for(auto &pair: rpc_clients_map) {
+                        thread_pool->enqueue(&RaftNode::send_append_entries, this, pair.first, append_entries_args);
+                    }
+                }
+            }
+            // TODO: 修改发送心跳的时间间隔
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        }
+    }
 
     return;
 }
