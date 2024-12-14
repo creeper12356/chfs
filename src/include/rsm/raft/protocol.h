@@ -21,8 +21,8 @@ struct RequestVoteArgs {
     /* Lab3: Your code here */
     int term;
     int candidate_id;
-    unsigned long last_log_index;
-    unsigned long last_log_term;
+    int last_log_index;
+    int last_log_term;
     MSGPACK_DEFINE(
         term,
         candidate_id,
@@ -34,7 +34,7 @@ struct RequestVoteArgs {
 struct RequestVoteReply {
     /* Lab3: Your code here */
     int term;
-    unsigned long vote_granted;
+    int vote_granted;
     MSGPACK_DEFINE(
         term,
         vote_granted
@@ -46,21 +46,21 @@ struct AppendEntriesArgs {
     /* Lab3: Your code here */
     int term;
     int leader_id;
-    unsigned long prev_log_index;
+    int prev_log_index;
     int prev_log_term;
-    std::vector<Command *> entries;
-    unsigned long leader_commit;
+    std::vector<std::pair<int, Command>> entries;
+    int leader_commit;
 };
 
 struct RpcAppendEntriesArgs {
     /* Lab3: Your code here */
     int term;
     int leader_id;
-    unsigned long prev_log_index;
+    int prev_log_index;
     int prev_log_term;
     // TODO: 可能要修改
-    std::vector<u8> entries;
-    unsigned long leader_commit;
+    std::vector<std::pair<int, std::vector<u8>>> entries;
+    int leader_commit;
     MSGPACK_DEFINE(
         term,
         leader_id,
@@ -77,16 +77,35 @@ RpcAppendEntriesArgs transform_append_entries_args(const AppendEntriesArgs<Comma
     auto rpc_arg = RpcAppendEntriesArgs();
     rpc_arg.term = arg.term;
     rpc_arg.leader_id = arg.leader_id;
-    // TODO: 继续增加
+    rpc_arg.prev_log_index = arg.prev_log_index;
+    rpc_arg.prev_log_term = arg.prev_log_term;
 
+    for (const auto &entry: arg.entries) {
+        auto rpc_entry = std::make_pair(entry.first, entry.second.serialize(entry.second.size()));
+        rpc_arg.entries.push_back(rpc_entry);
+    }
+
+    rpc_arg.leader_commit = arg.leader_commit;
     return rpc_arg;
 }
 
 template <typename Command>
 AppendEntriesArgs<Command> transform_rpc_append_entries_args(const RpcAppendEntriesArgs &rpc_arg)
 {
-    /* Lab3: Your code here */
-    return AppendEntriesArgs<Command>();
+    auto arg = AppendEntriesArgs<Command>();
+    arg.term = rpc_arg.term;
+    arg.leader_id = rpc_arg.leader_id;
+    arg.prev_log_index = rpc_arg.prev_log_index;
+    arg.prev_log_term = rpc_arg.prev_log_term;
+
+    for (const auto &rpc_entry: rpc_arg.entries) {
+        Command cmd;
+        cmd.deserialize(rpc_entry.second, rpc_entry.second.size());
+        arg.entries.push_back(std::make_pair(rpc_entry.first, cmd));
+    }
+
+    arg.leader_commit = rpc_arg.leader_commit;
+    return arg;
 }
 
 struct AppendEntriesReply {
