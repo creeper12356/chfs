@@ -299,8 +299,10 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
         return RequestVoteReply{current_term, false};
     }
     if(args.term > current_term) {
+        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
         current_term = args.term;
         role = RaftRole::Follower;
+        voted_for = -1;
     }
 
     std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
@@ -363,14 +365,17 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     RAFT_LOG("app_ent\trcv heartbeat");
     last_heartbeat_time = std::chrono::system_clock::now();
     std::lock_guard<std::mutex> role_lock(role_mtx);
+    std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
     if(role == RaftRole::Follower) {
         if(rpc_arg.term > current_term) {
             current_term = rpc_arg.term;
+            voted_for = -1;
         }
     } else if(role == RaftRole::Candidate) {
         role = RaftRole::Follower;
         if(rpc_arg.term > current_term) {
             current_term = rpc_arg.term;
+            voted_for = -1;
         }
     } else {
         // RaftNode::Leader
@@ -391,8 +396,10 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
     std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
     if(reply.term > current_term) {
         std::lock_guard<std::mutex> role_lock(role_mtx);
+        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
         role = RaftRole::Follower;
         current_term = reply.term;
+        voted_for = -1;
         return;
     }
 }
@@ -511,7 +518,9 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                 {
                     std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
                     std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
+                    std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
                     ++ current_term;
+                    voted_for = -1; //NOTE: voted_for = my_id;也可以
                     leader_id = -1;
                     {
                         std::lock_guard<std::mutex> role_lock(role_mtx);
