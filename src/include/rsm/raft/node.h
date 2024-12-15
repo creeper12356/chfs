@@ -121,17 +121,6 @@ private:
 
     std::mutex mtx;                             /* A big lock to protect the whole data structure. */
     std::mutex clients_mtx;                     /* A lock to protect RpcClient pointers */
-    std::mutex current_term_mtx;
-    std::mutex vote_count_mtx;
-    std::mutex role_mtx;
-    std::mutex voted_for_mtx;
-    std::mutex leader_id_mtx;
-    std::mutex log_entries_mtx;
-    std::mutex commit_index_mtx;
-    std::mutex last_applied_mtx;
-
-    std::mutex next_index_mtx;
-    std::mutex match_index_mtx;
 
     std::unique_ptr<ThreadPool> thread_pool; // thread-safe itself
     std::unique_ptr<RaftLog<Command>> log_storage;     /* To persist the raft log. */
@@ -144,9 +133,9 @@ private:
 
     std::atomic_bool stopped;
 
-    RaftRole role; // need mutex lock
-    int current_term; // need mutex lock
-    int leader_id; // need mutex lock
+    RaftRole role; 
+    int current_term; 
+    int leader_id; 
 
     std::unique_ptr<std::thread> background_election;
     std::unique_ptr<std::thread> background_ping;
@@ -154,18 +143,18 @@ private:
     std::unique_ptr<std::thread> background_apply;
 
     /* Lab3: Your code here */
-    int voted_for = -1; // need mutex lock
+    int voted_for = -1; 
 
-    int commit_index = 0; // need mutex lock
-    int last_applied = 0; // need mutex lock
+    int commit_index = 0; 
+    int last_applied = 0; 
 
-    int vote_count = 0; // need mutex lock
+    int vote_count = 0; 
 
     std::atomic<std::chrono::time_point<std::chrono::system_clock>> last_heartbeat_time = std::chrono::system_clock::now();
 
     // 内存中的日志列表，每个日志条目包含<term, command> 
 
-    std::vector<std::pair<int, Command>> log_entries; // need mutex lock
+    std::vector<std::pair<int, Command>> log_entries; 
 
     // leaders-only member
     std::vector<int> next_index;
@@ -262,8 +251,7 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::is_leader() -> std::tuple<bool, int>
 {
     /* Lab3: Your code here */
-    std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
-    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    std::unique_lock<std::mutex> lock(mtx);
     return std::make_tuple(leader_id == my_id, current_term);
 }
 
@@ -277,19 +265,15 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int cmd_size) -> std::tuple<bool, int, int>
 {
     RAFT_LOG("nw_cmd\tcmd_size: %d", cmd_size);
-    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-    {
-        std::lock_guard<std::mutex> role_lock(role_mtx);
-        if(role != RaftRole::Leader) {
-            RAFT_LOG("nw_cmd\treject cuz not leader");
-            return std::make_tuple(false, current_term, -1);
-        }
+    std::unique_lock<std::mutex> lock(mtx);
+    if(role != RaftRole::Leader) {
+        RAFT_LOG("nw_cmd\treject cuz not leader");
+        return std::make_tuple(false, current_term, -1);
     }
     
     auto log_entry = std::make_pair(current_term, Command());
     log_entry.second.deserialize(cmd_data, cmd_size);
 
-    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
     log_entries.push_back(std::move(log_entry));
 
     return std::make_tuple(true, current_term, log_entries.size() - 1);
@@ -320,31 +304,23 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> RequestVoteReply
 {
     /* Lab3: Your code here */
-    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-    std::lock_guard<std::mutex> role_lock(role_mtx);
-
+    std::unique_lock<std::mutex> lock(mtx);
     // RAFT_LOG("req_vote\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
-
 
     if(args.term < current_term) {
         RAFT_LOG("req_vote\tterm too old");
         return RequestVoteReply{current_term, false};
     }
     if(args.term > current_term) {
-        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
         current_term = args.term;
         role = RaftRole::Follower;
         voted_for = -1;
     }
 
-    std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
-
     if(voted_for == -1 || voted_for == args.candidate_id) {
         last_heartbeat_time = std::chrono::system_clock::now();
         voted_for = args.candidate_id;
         // 判断candidate的LOG是否比自己新
-
-        std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
 
         if(args.last_log_term > log_entries.back().first
          || (args.last_log_term == log_entries.back().first && args.last_log_index >= log_entries.size() - 1) ){
@@ -361,12 +337,9 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, const RequestVoteArgs arg, const RequestVoteReply reply)
 {
-    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-    std::lock_guard<std::mutex> role_lock(role_mtx);
+    std::unique_lock<std::mutex> lock(mtx);
 
     if(reply.term > current_term) {
-        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
-
         current_term = reply.term;
         role = RaftRole::Follower;
         voted_for = -1;
@@ -375,7 +348,6 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
 
     // 收集投票结果
     if(role == RaftRole::Candidate && reply.vote_granted) {
-        std::lock_guard<std::mutex> vote_count_lock(vote_count_mtx);
         std::lock_guard<std::mutex> clients_lock(clients_mtx);
 
         ++ vote_count;
@@ -384,23 +356,15 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
             RAFT_LOG("hdl_req_vote\tbecome leader");
             // 新的leader上任(come to power)
             role = RaftRole::Leader;
-            std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
             leader_id = my_id;
 
             // 重新初始化next_index
-            {
-                std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
-                std::lock_guard<std::mutex> next_index_lock(next_index_mtx);
-
-                next_index.resize(rpc_clients_map.size());
-                std::fill(next_index.begin(), next_index.end(), log_entries.size());
-            }
+            next_index.resize(rpc_clients_map.size());
+            std::fill(next_index.begin(), next_index.end(), log_entries.size());
 
             // 重新初始化match_index
-            {
-                match_index.resize(rpc_clients_map.size());
-                std::fill(match_index.begin(), match_index.end(), 0);
-            }
+            match_index.resize(rpc_clients_map.size());
+            std::fill(match_index.begin(), match_index.end(), 0);
         }
     }
 }
@@ -409,8 +373,7 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_arg) -> AppendEntriesReply
 {
     /* Lab3: Your code here */
-    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-    
+    std::unique_lock<std::mutex> lock(mtx);
     // RAFT_LOG("app_ent\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
     if(rpc_arg.term < current_term) {
         // 旧的任期，忽略
@@ -420,15 +383,11 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     }
     if(rpc_arg.term > current_term) {
         // 任期更新
-        std::lock_guard<std::mutex> role_lock(role_mtx);
-        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
-
         current_term = rpc_arg.term;
         role = RaftRole::Follower;
         voted_for = -1;
     }
 
-    std::lock_guard<std::mutex> role_lock(role_mtx);
     if(role == RaftRole::Candidate) {
         // 当前是candidate，
         // 收到心跳或者追加日志请求，
@@ -442,8 +401,6 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
         return AppendEntriesReply{current_term, true};
     } else {
         // 接收leader的追加日志请求
-        std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
-
         if(rpc_arg.prev_log_index >= log_entries.size()) {
             // 来自的prev_log_index位置不存在log entry
             return AppendEntriesReply{current_term, false};
@@ -465,7 +422,6 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
         }
 
         // 更新 commit index
-        std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
         if(rpc_arg.leader_commit > commit_index) {
             commit_index = std::min(rpc_arg.leader_commit, log_entries_final_size - 1);
         }
@@ -478,11 +434,8 @@ template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, const AppendEntriesArgs<Command> arg, const AppendEntriesReply reply)
 {
     /* Lab3: Your code here */
-    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+    std::unique_lock<std::mutex> lock(mtx);
     if(reply.term > current_term) {
-        std::lock_guard<std::mutex> role_lock(role_mtx);
-        std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
-
         role = RaftRole::Follower;
         current_term = reply.term;
         voted_for = -1;
@@ -496,9 +449,6 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
 
     if(reply.success) {
         // AppendEntries成功，更新next_index和match_index
-        std::lock_guard<std::mutex> next_index_lock(next_index_mtx);
-        std::lock_guard<std::mutex> match_index_lock(match_index_mtx);
-
         // NOTE: 此处更新next_index不需要精确
         // 只需要保证next_index[node_id] >= arg.entries.size()
         // ref: https://groups.google.com/g/raft-dev/c/2-ReA6bLJTk?pli=1
@@ -506,9 +456,6 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
         match_index[node_id] = next_index[node_id] - 1;
     } else {
         // AppendEntries失败，减小next_index，重试
-        std::lock_guard<std::mutex> next_index_lock(next_index_mtx);
-        std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
-
         auto new_arg = arg;
         -- next_index[node_id];
         new_arg.prev_log_index = next_index[node_id] - 1;
@@ -628,21 +575,14 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                 RAFT_LOG("bg_ele\tnew election start");
                 RequestVoteArgs request_vote_args;
                 {
-                    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-                    std::lock_guard<std::mutex> leader_id_lock(leader_id_mtx);
-                    std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
+                    std::unique_lock<std::mutex> lock(mtx);
+
                     ++ current_term;
                     voted_for = -1; //NOTE: voted_for = my_id;也可以
                     leader_id = -1;
-                    {
-                        std::lock_guard<std::mutex> role_lock(role_mtx);
-                        role = RaftRole::Candidate;
-                    }
+                    role = RaftRole::Candidate;
                     request_vote_args.term = current_term;
-                }
-                request_vote_args.candidate_id = my_id;
-                {
-                    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
+                    request_vote_args.candidate_id = my_id;
                     request_vote_args.last_log_index = log_entries.size() - 1;
                     request_vote_args.last_log_term = log_entries.back().first;
                 }
@@ -658,8 +598,7 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                 }
 
                 {
-                    std::lock_guard<std::mutex> role_lock(role_mtx);
-                    std::lock_guard<std::mutex> vote_count_lock(vote_count_mtx);
+                    std::unique_lock<std::mutex> lock(mtx);
                     if(role == RaftRole::Candidate) {
                         // 选举未成功（失败或者没有leader）
                         RAFT_LOG("bg_ele\telection not success");
@@ -691,27 +630,20 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
             // NOTE: 此处需要立即放锁，否则sleep拿锁会导致死锁
             RaftRole role_local;
             {
-                std::lock_guard<std::mutex> role_lock(role_mtx);
+                std::unique_lock<std::mutex> lock(mtx);
                 role_local = role;
             }
 
             if (role_local == RaftRole::Leader) {
                 // 发送日志备份请求
                 {
-                    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-                    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
-                    std::lock_guard<std::mutex> rpc_clients_lock(clients_mtx);
-                    std::lock_guard<std::mutex> next_index_lock(next_index_mtx);
-
+                    std::unique_lock<std::mutex> lock(mtx);
 
                     AppendEntriesArgs<Command> args;
                     args.term = current_term;
                     args.leader_id = my_id;
                     args.entries = log_entries;
-                    {
-                        std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
-                        args.leader_commit = commit_index;
-                    }
+                    args.leader_commit = commit_index;
 
                     int last_entry_index = log_entries.size() - 1;
                     
@@ -734,20 +666,15 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                 
                 // 更新leader的commit index
                 {
+                    std::unique_lock<std::mutex> lock(mtx);
                     auto sorted_match_index = std::vector<int>();
-                    {
-                        std::lock_guard<std::mutex> match_index_lock(match_index_mtx);
-                        sorted_match_index = match_index;
-                    }
+                    sorted_match_index = match_index;
                     std::sort(sorted_match_index.begin(), sorted_match_index.end());
                     auto sorted_match_index_size = sorted_match_index.size();
 
                     int max_commit_index = sorted_match_index[
                         sorted_match_index_size % 2 ? sorted_match_index_size / 2 : sorted_match_index_size / 2 - 1
                     ];
-
-                    std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
-                    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
 
                     if(commit_index >= max_commit_index) {
                         continue;
@@ -782,10 +709,8 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
                 return;
             }
             /* Lab3: Your code here */
-            std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
-            std::lock_guard<std::mutex> last_applied_lock(last_applied_mtx);
+            std::unique_lock<std::mutex> lock(mtx);
             if(commit_index > last_applied) {
-                std::unique_lock<std::mutex> lock(mtx);
                 for(int i = last_applied + 1; i <= commit_index; ++ i) {
                     state->apply_log(log_entries[i].second);
                 }
@@ -813,7 +738,7 @@ void RaftNode<StateMachine, Command>::run_background_ping() {
             // RAFT_LOG("bg_ping\trunning bg_ping");
             /* Lab3: Your code here */
             {
-                std::lock_guard<std::mutex> role_lock(role_mtx);
+                std::unique_lock<std::mutex> lock(mtx);
                 if(role == RaftRole::Leader) {
                     RAFT_LOG("bg_ping\tping...");
                     AppendEntriesArgs<Command> append_entries_args;
