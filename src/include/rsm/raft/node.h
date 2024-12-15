@@ -127,6 +127,8 @@ private:
     std::mutex voted_for_mtx;
     std::mutex leader_id_mtx;
     std::mutex log_entries_mtx;
+    std::mutex commit_index_mtx;
+    std::mutex last_applied_mtx;
 
     std::mutex next_index_mtx;
     std::mutex match_index_mtx;
@@ -154,8 +156,8 @@ private:
     /* Lab3: Your code here */
     int voted_for = -1; // need mutex lock
 
-    int commit_index = 0; // TODO: use mutex lock?
-    int last_applied = 0;
+    int commit_index = 0; // need mutex lock
+    int last_applied = 0; // need mutex lock
 
     int vote_count = 0; // need mutex lock
 
@@ -341,13 +343,12 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
 
         std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
 
-        // TODO: 取消注释
-        // if(args.last_log_term > log_entries.back().first
-        //  && args.last_log_index >= log_entries.size() - 1) {
+        if(args.last_log_term > log_entries.back().first
+         || (args.last_log_term == log_entries.back().first && args.last_log_index >= log_entries.size() - 1) ){
             return RequestVoteReply{current_term, true};
-        // } else {
-        //     RAFT_LOG("req_vote\tvote denied. candidate's log is not up-to-date");
-        // }
+        } else {
+            RAFT_LOG("req_vote\tvote denied. candidate's log is not up-to-date");
+        }
     }
     RAFT_LOG("req_vote\tvote denied. voted_for %d, args.candidate_id %d", voted_for, args.candidate_id);
     return RequestVoteReply{current_term, false};
@@ -450,7 +451,7 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
         }
 
         // 直接覆盖prev_log_index之后的log entry
-        auto log_entries_final_size = rpc_arg.entries.size();
+        int log_entries_final_size = rpc_arg.entries.size();
         log_entries.resize(log_entries_final_size);
         for(int i = rpc_arg.prev_log_index + 1; i < log_entries_final_size; ++ i) {
             auto &rpc_entry = rpc_arg.entries[i];
@@ -459,7 +460,11 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
             log_entries[i] = std::move(entry);
         }
 
-        // TODO: 处理leader_commit的问题
+        // 更新 commit index
+        std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
+        if(rpc_arg.leader_commit > commit_index) {
+            commit_index = std::min(rpc_arg.leader_commit, log_entries_final_size - 1);
+        }
 
         return AppendEntriesReply{current_term, true};
     }
@@ -680,34 +685,77 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
             if (is_stopped()) {
                 return;
             }
-            std::lock_guard<std::mutex> role_lock(role_mtx);
+            // NOTE: 此处需要立即放锁，否则sleep拿锁会导致死锁
+            RaftRole role_local;
+            {
+                std::lock_guard<std::mutex> role_lock(role_mtx);
+                role_local = role;
+            }
 
-            if (role == RaftRole::Leader) {
-                std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-                std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
-                std::lock_guard<std::mutex> rpc_clients_lock(clients_mtx);
-                std::lock_guard<std::mutex> next_index_lock(next_index_mtx);
+            if (role_local == RaftRole::Leader) {
+                // 发送日志备份请求
+                {
+                    std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
+                    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
+                    std::lock_guard<std::mutex> rpc_clients_lock(clients_mtx);
+                    std::lock_guard<std::mutex> next_index_lock(next_index_mtx);
 
-                AppendEntriesArgs<Command> args;
-                args.term = current_term;
-                args.leader_id = my_id;
-                args.entries = log_entries;
-                // TODO: commit_index加锁
-                args.leader_commit = commit_index;
 
-                int last_entry_index = log_entries.size() - 1;
+                    AppendEntriesArgs<Command> args;
+                    args.term = current_term;
+                    args.leader_id = my_id;
+                    args.entries = log_entries;
+                    {
+                        std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
+                        args.leader_commit = commit_index;
+                    }
+
+                    int last_entry_index = log_entries.size() - 1;
+                    
+                    // 发送给除了自己以外的所有节点(follwer and candidate)
+                    for(auto &pair: rpc_clients_map) {
+                        if(pair.first == my_id) {
+                            continue;
+                        }
+                        if(last_entry_index < next_index[pair.first]) {
+                            continue;
+                        }
+                        args.prev_log_index = next_index[pair.first] - 1;
+                        args.prev_log_term = log_entries[args.prev_log_index].first;
+                        thread_pool->enqueue(&RaftNode::send_append_entries, this, pair.first, args);
+                    }
+                }
                 
-                // 发送给除了自己以外的所有节点
-                for(auto &pair: rpc_clients_map) {
-                    if(pair.first == my_id) {
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                
+                // 更新leader的commit index
+                {
+                    auto sorted_match_index = std::vector<int>();
+                    {
+                        std::lock_guard<std::mutex> match_index_lock(match_index_mtx);
+                        sorted_match_index = match_index;
+                    }
+                    std::sort(sorted_match_index.begin(), sorted_match_index.end());
+                    auto sorted_match_index_size = sorted_match_index.size();
+
+                    int max_commit_index = sorted_match_index[
+                        sorted_match_index_size % 2 ? sorted_match_index_size / 2 : sorted_match_index_size / 2 - 1
+                    ];
+
+                    std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
+                    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
+
+                    if(commit_index >= max_commit_index) {
                         continue;
                     }
-                    if(last_entry_index < next_index[pair.first]) {
-                        continue;
+                    for(auto ci = max_commit_index; ci > commit_index; -- ci) {
+                        if(log_entries[ci].first == current_term) {
+                            // 大多数节点都已经复制了这个日志
+                            commit_index = ci;
+                            break;
+                        }
                     }
-                    args.prev_log_index = next_index[pair.first] - 1;
-                    args.prev_log_term = log_entries[args.prev_log_index].first;
-                    thread_pool->enqueue(&RaftNode::send_append_entries, this, pair.first, args);
                 }
             }
         }
@@ -725,14 +773,23 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
     // Work for all the nodes.
 
     /* Uncomment following code when you finish */
-    // while (true) {
-    //     {
-    //         if (is_stopped()) {
-    //             return;
-    //         }
-    //         /* Lab3: Your code here */
-    //     }
-    // }
+    while (true) {
+        {
+            if (is_stopped()) {
+                return;
+            }
+            /* Lab3: Your code here */
+            std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
+            std::lock_guard<std::mutex> last_applied_lock(last_applied_mtx);
+            if(commit_index > last_applied) {
+                for(int i = last_applied + 1; i <= commit_index; ++ i) {
+                    state->apply_log(log_entries[i].second);
+                }
+                last_applied = commit_index;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     return;
 }
