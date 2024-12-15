@@ -203,6 +203,7 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
     /* Lab3: Your code here */ 
     // NOTE: do not hardcoded the thread number
     thread_pool = std::make_unique<ThreadPool>(100);
+    state = std::make_unique<StateMachine>();
     // NOTE: 由于日志index从1开始，所以这里插入一个空的log entry
     log_entries.push_back(std::make_pair(0, Command()));
 
@@ -275,17 +276,20 @@ auto RaftNode<StateMachine, Command>::is_stopped() -> bool
 template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int cmd_size) -> std::tuple<bool, int, int>
 {
-    std::lock_guard<std::mutex> role_lock(role_mtx);
+    RAFT_LOG("nw_cmd\tcmd_size: %d", cmd_size);
     std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
-    if(role != RaftRole::Leader) {
-        return std::make_tuple(false, current_term, -1);
+    {
+        std::lock_guard<std::mutex> role_lock(role_mtx);
+        if(role != RaftRole::Leader) {
+            RAFT_LOG("nw_cmd\treject cuz not leader");
+            return std::make_tuple(false, current_term, -1);
+        }
     }
-
-    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
     
     auto log_entry = std::make_pair(current_term, Command());
     log_entry.second.deserialize(cmd_data, cmd_size);
 
+    std::lock_guard<std::mutex> log_entries_lock(log_entries_mtx);
     log_entries.push_back(std::move(log_entry));
 
     return std::make_tuple(true, current_term, log_entries.size() - 1);
@@ -319,7 +323,7 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
     std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
     std::lock_guard<std::mutex> role_lock(role_mtx);
 
-    RAFT_LOG("req_vote\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    // RAFT_LOG("req_vote\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
 
     if(args.term < current_term) {
@@ -336,7 +340,6 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
     std::lock_guard<std::mutex> voted_for_lock(voted_for_mtx);
 
     if(voted_for == -1 || voted_for == args.candidate_id) {
-        RAFT_LOG("req_vote\tvote granted for %d", args.candidate_id);
         last_heartbeat_time = std::chrono::system_clock::now();
         voted_for = args.candidate_id;
         // 判断candidate的LOG是否比自己新
@@ -345,12 +348,13 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
 
         if(args.last_log_term > log_entries.back().first
          || (args.last_log_term == log_entries.back().first && args.last_log_index >= log_entries.size() - 1) ){
+            RAFT_LOG("req_vote\tvote granted for %d", args.candidate_id);
             return RequestVoteReply{current_term, true};
         } else {
             RAFT_LOG("req_vote\tvote denied. candidate's log is not up-to-date");
         }
     }
-    RAFT_LOG("req_vote\tvote denied. voted_for %d, args.candidate_id %d", voted_for, args.candidate_id);
+    RAFT_LOG("req_vote\tvote denied.");
     return RequestVoteReply{current_term, false};
 }
 
@@ -407,11 +411,11 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     /* Lab3: Your code here */
     std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
     
-    RAFT_LOG("app_ent\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    // RAFT_LOG("app_ent\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
     if(rpc_arg.term < current_term) {
         // 旧的任期，忽略
         RAFT_LOG("app_ent\tterm too old");
-        RAFT_LOG("app_ent\tcurrent_term %d, rpc_arg.term %d", current_term, rpc_arg.term);
+        // RAFT_LOG("app_ent\tcurrent_term %d, rpc_arg.term %d", current_term, rpc_arg.term);
         return AppendEntriesReply{current_term, false};
     }
     if(rpc_arg.term > current_term) {
@@ -532,7 +536,7 @@ void RaftNode<StateMachine, Command>::handle_install_snapshot_reply(int node_id,
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::send_request_vote(int target_id, RequestVoteArgs arg)
 {
-    RAFT_LOG("send_req_vote\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    // RAFT_LOG("send_req_vote\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
     std::unique_lock<std::mutex> clients_lock(clients_mtx);
     if (rpc_clients_map[target_id] == nullptr
         || rpc_clients_map[target_id]->get_connection_state() != rpc::client::connection_state::connected) {
@@ -554,7 +558,7 @@ void RaftNode<StateMachine, Command>::send_request_vote(int target_id, RequestVo
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::send_append_entries(int target_id, AppendEntriesArgs<Command> arg)
 {
-    RAFT_LOG("send_app_ent\ttarget_id %d", target_id);
+    // RAFT_LOG("send_app_ent\ttarget_id %d", target_id);
     std::unique_lock<std::mutex> clients_lock(clients_mtx);
     if (rpc_clients_map[target_id] == nullptr 
         || rpc_clients_map[target_id]->get_connection_state() != rpc::client::connection_state::connected) {
@@ -566,7 +570,7 @@ void RaftNode<StateMachine, Command>::send_append_entries(int target_id, AppendE
     auto res = rpc_clients_map[target_id]->call(RAFT_RPC_APPEND_ENTRY, rpc_arg);
     clients_lock.unlock();
     if (res.is_ok()) {
-        RAFT_LOG("send_app_ent\trpc success");
+        // RAFT_LOG("send_app_ent\trpc success");
         handle_append_entries_reply(target_id, arg, res.unwrap()->as<AppendEntriesReply>());
     } else {
         // RPC fails
@@ -610,19 +614,18 @@ void RaftNode<StateMachine, Command>::run_background_election() {
     /* Uncomment following code when you finish */
     while (true) {
         {
-            RAFT_LOG("bg_ele\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+            // RAFT_LOG("bg_ele\ttid: %lu", std::hash<std::thread::id>{}(std::this_thread::get_id()));
             if (is_stopped()) {
                 return;
             }
             /* Lab3: Your code here */
             // 使用随机的选举超时时间
             int election_timeout = RandomNumberGenerator().rand(300, 500);
-            RAFT_LOG("bg_ele\tgen timeout %d", election_timeout);
-            RAFT_LOG("bg_ele\tbegin sleep");
+            RAFT_LOG("bg_ele\tgen timeout %d, sleep to wait", election_timeout);
             std::this_thread::sleep_for(std::chrono::milliseconds(election_timeout));
             if(last_heartbeat_time.load() + std::chrono::milliseconds(election_timeout) < std::chrono::system_clock::now()) {
                 // 收到leader心跳超时，发起选举
-                RAFT_LOG("bg_ele\telection start");
+                RAFT_LOG("bg_ele\tnew election start");
                 RequestVoteArgs request_vote_args;
                 {
                     std::lock_guard<std::mutex> current_term_lock(current_term_mtx);
@@ -658,7 +661,7 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                     std::lock_guard<std::mutex> role_lock(role_mtx);
                     std::lock_guard<std::mutex> vote_count_lock(vote_count_mtx);
                     if(role == RaftRole::Candidate) {
-                        // 选举失败
+                        // 选举未成功（失败或者没有leader）
                         RAFT_LOG("bg_ele\telection not success");
                         role = RaftRole::Follower;
                     } else {
@@ -782,6 +785,7 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
             std::lock_guard<std::mutex> commit_index_lock(commit_index_mtx);
             std::lock_guard<std::mutex> last_applied_lock(last_applied_mtx);
             if(commit_index > last_applied) {
+                std::unique_lock<std::mutex> lock(mtx);
                 for(int i = last_applied + 1; i <= commit_index; ++ i) {
                     state->apply_log(log_entries[i].second);
                 }
