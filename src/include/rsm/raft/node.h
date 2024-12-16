@@ -252,7 +252,7 @@ auto RaftNode<StateMachine, Command>::is_leader() -> std::tuple<bool, int>
 {
     /* Lab3: Your code here */
     std::unique_lock<std::mutex> lock(mtx);
-    return std::make_tuple(leader_id == my_id, current_term);
+    return std::make_tuple(role == RaftRole::Leader, current_term);
 }
 
 template <typename StateMachine, typename Command>
@@ -345,6 +345,7 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
     if(args.term > current_term) {
         current_term = args.term;
         role = RaftRole::Follower;
+        leader_id = -1;
         voted_for = -1;
     }
 
@@ -373,6 +374,7 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
     if(reply.term > current_term) {
         current_term = reply.term;
         role = RaftRole::Follower;
+        leader_id = -1;
         voted_for = -1;
         return ;
     }
@@ -417,6 +419,7 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
         RAFT_LOG("app_ent\tterm update and become follower");
         current_term = rpc_arg.term;
         role = RaftRole::Follower;
+        leader_id = rpc_arg.leader_id;
         voted_for = -1;
     }
 
@@ -426,6 +429,7 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
         // 收到心跳或者追加日志请求，
         // 转为follower
         role = RaftRole::Follower;
+        leader_id = rpc_arg.leader_id;
     }
 
     
@@ -478,6 +482,7 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
     if(reply.term > current_term) {
         RAFT_LOG("send_app_ent\tterm update and become follower");
         role = RaftRole::Follower;
+        leader_id = -1;
         current_term = reply.term;
         voted_for = -1;
         return;
