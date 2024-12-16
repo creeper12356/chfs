@@ -193,8 +193,34 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
     // NOTE: do not hardcoded the thread number
     thread_pool = std::make_unique<ThreadPool>(100);
     state = std::make_unique<StateMachine>();
-    // NOTE: 由于日志index从1开始，所以这里插入一个空的log entry
-    log_entries.push_back(std::make_pair(0, Command()));
+
+
+    // 初始化日志持久化存储
+    auto node_log_filename = "/tmp/raft_log/" + std::to_string(my_id);
+
+    if(is_file_exist(node_log_filename)) {
+        // 从持久化存储中加载数据
+        auto bm = std::make_shared<BlockManager>(node_log_filename);
+        log_storage = std::make_unique<RaftLog<Command>>(bm);
+        
+        current_term = log_storage->load_current_term();
+        voted_for = log_storage->load_voted_for();
+        log_entries = log_storage->load_log_entries();
+    } else {
+        // 初始化持久化存储
+        auto bm = std::make_shared<BlockManager>(node_log_filename);
+        log_storage = std::make_unique<RaftLog<Command>>(bm);
+
+        assert(current_term == 0);
+        log_storage->store_current_term(current_term);
+        assert(voted_for == -1);
+        log_storage->store_voted_for(voted_for);
+
+        // NOTE: 由于日志index从1开始，所以这里插入一个空的log entry
+        log_entries.push_back(std::make_pair(0, Command()));
+        log_storage->store_log_entries(log_entries);
+    }
+
 
     rpc_server->run(true, configs.size()); 
 }
@@ -304,6 +330,7 @@ auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int 
     log_entry.second.deserialize(cmd_data, cmd_size);
 
     log_entries.push_back(std::move(log_entry));
+    log_storage->store_log_entries(log_entries);
 
     RAFT_LOG("new_cmd\tlog entry added, log index: %d", static_cast<int>(log_entries.size() - 1));
 
@@ -343,14 +370,20 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
         return RequestVoteReply{current_term, false};
     }
     if(args.term > current_term) {
+        log_storage->store_current_term(args.term);
         current_term = args.term;
+
         role = RaftRole::Follower;
         leader_id = -1;
+
+        log_storage->store_voted_for(-1);
         voted_for = -1;
     }
 
     if(voted_for == -1 || voted_for == args.candidate_id) {
         last_heartbeat_time = std::chrono::system_clock::now();
+
+        log_storage->store_voted_for(args.candidate_id);
         voted_for = args.candidate_id;
         // 判断candidate的LOG是否比自己新
 
@@ -372,9 +405,13 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
     std::unique_lock<std::mutex> lock(mtx);
 
     if(reply.term > current_term) {
+        log_storage->store_current_term(reply.term);
         current_term = reply.term;
+
         role = RaftRole::Follower;
         leader_id = -1;
+
+        log_storage->store_voted_for(-1);
         voted_for = -1;
         return ;
     }
@@ -417,9 +454,14 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     if(rpc_arg.term > current_term) {
         // 任期更新
         RAFT_LOG("app_ent\tterm update and become follower");
+
+        log_storage->store_current_term(rpc_arg.term);
         current_term = rpc_arg.term;
+
         role = RaftRole::Follower;
         leader_id = rpc_arg.leader_id;
+
+        log_storage->store_voted_for(-1);
         voted_for = -1;
     }
 
@@ -462,6 +504,7 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
             entry.second.deserialize(rpc_entry.second, rpc_entry.second.size());
             log_entries[i] = std::move(entry);
         }
+        log_storage->store_log_entries(log_entries);
     }
 
     // 更新 commit index
@@ -483,7 +526,11 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
         RAFT_LOG("send_app_ent\tterm update and become follower");
         role = RaftRole::Follower;
         leader_id = -1;
+
+        log_storage->store_current_term(reply.term);
         current_term = reply.term;
+
+        log_storage->store_voted_for(-1);
         voted_for = -1;
         return;
     }
@@ -545,9 +592,7 @@ void RaftNode<StateMachine, Command>::send_request_vote(int target_id, RequestVo
         handle_request_vote_reply(target_id, arg, res.unwrap()->as<RequestVoteReply>());
     } else {
         // RPC fails
-        // NOTE: 暂时
         RAFT_LOG("send_req_vote\trpc fails");
-        assert(0);
     }
 }
 
@@ -572,7 +617,6 @@ void RaftNode<StateMachine, Command>::send_append_entries(int target_id, AppendE
         // RPC fails
         // NOTE: 暂时
         RAFT_LOG("send_app_ent\trpc fails");
-        assert(0);
     }
 }
 
@@ -639,6 +683,8 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                     std::unique_lock<std::mutex> lock(mtx);
 
                     ++ current_term;
+
+                    log_storage->store_voted_for(-1);
                     voted_for = -1; //NOTE: voted_for = my_id;也可以
                     leader_id = -1;
                     role = RaftRole::Candidate;
