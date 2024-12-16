@@ -270,6 +270,35 @@ auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int 
         RAFT_LOG("new_cmd\treject cuz not leader");
         return std::make_tuple(false, current_term, -1);
     }
+
+    // 同步地给所有follower发送一次心跳
+    RAFT_LOG("new_cmd\tping to make sure self are newest leader");
+    AppendEntriesArgs<Command> append_entries_args;
+    append_entries_args.term = current_term;
+    append_entries_args.leader_id = my_id;
+    // NOTE: 心跳不带有prev_log_index和prev_log_term,以及entries
+    append_entries_args.leader_commit = commit_index;
+
+    lock.unlock();
+    std::vector<std::future<void>> futures;
+    for(auto &pair: rpc_clients_map) {
+        if(pair.first == my_id) {
+            // 不需要给自己发心跳
+            continue;
+        }
+        futures.push_back(thread_pool->enqueue(&RaftNode::send_append_entries, this, pair.first, append_entries_args));
+    }
+    // 显式等待所有的心跳发送并响应
+    for(auto &future: futures) {
+        future.get();
+    }
+    lock.lock();
+
+    if(role != RaftRole::Leader) {
+        // 发送心跳后发现自己不再是leader
+        RAFT_LOG("new_cmd\treject cuz not leader any more");
+        return std::make_tuple(false, current_term, -1);
+    }
     
     auto log_entry = std::make_pair(current_term, Command());
     log_entry.second.deserialize(cmd_data, cmd_size);
@@ -501,7 +530,7 @@ void RaftNode<StateMachine, Command>::send_request_vote(int target_id, RequestVo
     std::unique_lock<std::mutex> clients_lock(clients_mtx);
     if (rpc_clients_map[target_id] == nullptr
         || rpc_clients_map[target_id]->get_connection_state() != rpc::client::connection_state::connected) {
-        RAFT_LOG("send_req_vote\tnot connected");
+        RAFT_LOG("send_req_vote\tnot connected to %d", target_id);
         return ;
     }
 
@@ -524,7 +553,7 @@ void RaftNode<StateMachine, Command>::send_append_entries(int target_id, AppendE
     std::unique_lock<std::mutex> clients_lock(clients_mtx);
     if (rpc_clients_map[target_id] == nullptr 
         || rpc_clients_map[target_id]->get_connection_state() != rpc::client::connection_state::connected) {
-        RAFT_LOG("send_app_ent\tnot connected");
+        RAFT_LOG("send_app_ent\tnot connected to %d", target_id);
         return;
     }
 
@@ -580,7 +609,19 @@ void RaftNode<StateMachine, Command>::run_background_election() {
             if (is_stopped()) {
                 return;
             }
+            RaftRole role_local;
+            {
+                std::unique_lock<std::mutex> lock(mtx);
+                role_local = role;
+            }
+            if(role_local != RaftRole::Follower) {
+                // 只有follower才需要检查leader的心跳
+                // TODO: 直接sleep，等变成follower再唤醒这个线程
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
             /* Lab3: Your code here */
+            // follower定期检查来自leader的心跳
             // 使用随机的选举超时时间
             int election_timeout = RandomNumberGenerator().rand(300, 500);
             RAFT_LOG("bg_ele\tgen timeout %d, sleep to wait", election_timeout);
@@ -704,6 +745,9 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                 {
                     RAFT_LOG("bg_commit\ttry upd leader commit index");
                     std::unique_lock<std::mutex> lock(mtx);
+                    //NOTE: 需要更新match_index[leader_id]
+                    match_index[my_id] = log_entries.size() - 1;
+
                     auto sorted_match_index = match_index;
                     std::sort(sorted_match_index.begin(), sorted_match_index.end());
                     auto sorted_match_index_size = sorted_match_index.size();
@@ -713,7 +757,7 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                     ];
 
                     if(commit_index >= max_commit_index) {
-                        RAFT_LOG("bg_commit\tleader commit index is up-to-date");
+                        RAFT_LOG("bg_commit\tleader commit index is up-to-date, commit index %d, max_commit_index %d", commit_index, max_commit_index);
                         continue;
                     }
                     for(auto ci = max_commit_index; ci > commit_index; -- ci) {
@@ -780,13 +824,17 @@ void RaftNode<StateMachine, Command>::run_background_ping() {
             {
                 std::unique_lock<std::mutex> lock(mtx);
                 if(role == RaftRole::Leader) {
-                    // RAFT_LOG("bg_ping\tping...");
+                    RAFT_LOG("bg_ping\tping...");
                     AppendEntriesArgs<Command> append_entries_args;
                     append_entries_args.term = current_term;
                     append_entries_args.leader_id = my_id;
                     // NOTE: 心跳不带有prev_log_index和prev_log_term,以及entries
                     append_entries_args.leader_commit = commit_index;
                     for(auto &pair: rpc_clients_map) {
+                        if(pair.first == my_id) {
+                            // 不需要给自己发心跳
+                            continue;
+                        }
                         thread_pool->enqueue(&RaftNode::send_append_entries, this, pair.first, append_entries_args);
                     }
                 }
