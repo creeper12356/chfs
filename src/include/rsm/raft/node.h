@@ -380,7 +380,7 @@ auto RaftNode<StateMachine, Command>::save_snapshot() -> bool
     snapshot_data = state->snapshot();
     snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
 
-    auto new_log_entries = std::vector<std::pair<int, Command>>(log_entries.begin() + logical_to_physical(last_applied) + 1, log_entries.end());
+    auto new_log_entries = std::vector<std::pair<int, Command>>(log_entries.begin() + logical_to_physical(last_applied + 1), log_entries.end());
     new_log_entries.insert(new_log_entries.begin(), std::make_pair(snapshot_last_term, Command())); // dummy entry at index 0
     log_entries = new_log_entries;
     log_storage->store_log_entries(log_entries);
@@ -431,8 +431,8 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
         voted_for = args.candidate_id;
         // 判断candidate的LOG是否比自己新
 
-        if(args.last_log_term > log_entries.back().first
-         || (args.last_log_term == log_entries.back().first && args.last_log_index >= log_entries.size() - 1) ){
+        if(args.last_log_term > log_entries.back().first // NOTE: 有可能读到dummy entry? check
+         || (args.last_log_term == log_entries.back().first && args.last_log_index >= physical_to_logical(log_entries.size() - 1)) ){
             RAFT_LOG("req_vote\tvote granted for %d", args.candidate_id);
             return RequestVoteReply{current_term, true};
         } else {
@@ -474,7 +474,7 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
 
             // 重新初始化next_index
             next_index.resize(rpc_clients_map.size());
-            std::fill(next_index.begin(), next_index.end(), log_entries.size());
+            std::fill(next_index.begin(), next_index.end(), physical_to_logical(log_entries.size()));
 
             // 重新初始化match_index
             match_index.resize(rpc_clients_map.size());
@@ -527,34 +527,35 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     } else {
         // 接收leader的追加日志请求
         RAFT_LOG("app_ent\treceive append entries from %d", rpc_arg.leader_id);
-        if(rpc_arg.prev_log_index >= log_entries.size()) {
-            // 来自的prev_log_index位置不存在log entry
+        if(rpc_arg.prev_log_index >= physical_to_logical(log_entries.size())) {
+            // 来自prev_log_index位置不存在log entry
             RAFT_LOG("app_ent\treject cuz no such log entry at %d", rpc_arg.prev_log_index);
             return AppendEntriesReply{current_term, false};
         }
 
-        if(log_entries[rpc_arg.prev_log_index].first != rpc_arg.prev_log_term) {
+        if(log_entries[logical_to_physical(rpc_arg.prev_log_index)].first != rpc_arg.prev_log_term) {
             // 来自leader的prev_log_index位置的term与自己的term不一致
-            RAFT_LOG("app_ent\treject cuz term not match, %d != %d", log_entries[rpc_arg.prev_log_index].first, rpc_arg.prev_log_term);
+            RAFT_LOG("app_ent\treject cuz term not match, %d != %d", log_entries[logical_to_physical(rpc_arg.prev_log_index)].first, rpc_arg.prev_log_term);
             return AppendEntriesReply{current_term, false};
         }
 
         // 直接覆盖prev_log_index之后的log entry
+        // NOTE: 在这里假定leader和follower的快照是一致的 VERY IMPORTANT!
         int log_entries_final_size = rpc_arg.entries.size();
         log_entries.resize(log_entries_final_size);
         for(int i = rpc_arg.prev_log_index + 1; i < log_entries_final_size; ++ i) {
-            auto &rpc_entry = rpc_arg.entries[i];
+            auto &rpc_entry = rpc_arg.entries[logical_to_physical(i)];
             auto entry = std::make_pair(rpc_entry.first, Command());
             entry.second.deserialize(rpc_entry.second, rpc_entry.second.size());
-            log_entries[i] = std::move(entry);
+            log_entries[logical_to_physical(i)] = std::move(entry);
         }
         log_storage->store_log_entries(log_entries);
     }
 
     // 更新 commit index
     if(rpc_arg.leader_commit > commit_index) {
-        // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry) 
-        commit_index = std::min<int>(rpc_arg.leader_commit, log_entries.size() - 1);
+        // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry) // TODO: check again
+        commit_index = std::min<int>(rpc_arg.leader_commit, physical_to_logical(log_entries.size() - 1));
         RAFT_LOG("app_ent\tupd commit index to %d", commit_index);
     }
 
@@ -589,7 +590,7 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
         // NOTE: 此处更新next_index不需要精确
         // 只需要保证next_index[node_id] >= arg.entries.size()
         // ref: https://groups.google.com/g/raft-dev/c/2-ReA6bLJTk?pli=1
-        next_index[node_id] = arg.entries.size();
+        next_index[node_id] = physical_to_logical(arg.entries.size());
         match_index[node_id] = next_index[node_id] - 1;
         RAFT_LOG("send_app_ent\tappend success, upd next_index to %d, match_index to %d", next_index[node_id], match_index[node_id]);
     } else {
@@ -598,7 +599,7 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
         auto new_arg = arg;
         -- next_index[node_id];
         new_arg.prev_log_index = next_index[node_id] - 1;
-        new_arg.prev_log_term = log_entries[new_arg.prev_log_index].first;
+        new_arg.prev_log_term = log_entries[logical_to_physical(new_arg.prev_log_index)].first;
         thread_pool->enqueue(&RaftNode::send_append_entries, this, node_id, new_arg);
     }
 }
@@ -768,7 +769,7 @@ void RaftNode<StateMachine, Command>::run_background_election() {
             }
             if(role_local != RaftRole::Follower) {
                 // 只有follower才需要检查leader的心跳
-                // TODO: 直接sleep，等变成follower再唤醒这个线程
+                // NOTE: 可以直接sleep，等变成follower再唤醒这个线程
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -793,7 +794,7 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                     role = RaftRole::Candidate;
                     request_vote_args.term = current_term;
                     request_vote_args.candidate_id = my_id;
-                    request_vote_args.last_log_index = log_entries.size() - 1;
+                    request_vote_args.last_log_index = physical_to_logical(log_entries.size() - 1);
                     request_vote_args.last_log_term = log_entries.back().first;
                 }
 
@@ -856,18 +857,41 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                         node_ids.push_back(pair.first);
                     }
                 }
+
+                InstallSnapshotArgs install_snapshot_args;
+                {
+                    std::unique_lock<std::mutex> lock(mtx);
+                    install_snapshot_args.term = current_term;
+                    install_snapshot_args.leader_id = my_id;
+                    install_snapshot_args.last_included_index = snapshot_last_index;
+                    install_snapshot_args.last_included_term = snapshot_last_term;
+                    install_snapshot_args.data = snapshot_data;
+                }
+                std::vector<std::future<void>> futures;
+                for(auto &node_id: node_ids) {
+                    if(node_id == my_id) {
+                        continue;
+                    }
+                    std::unique_lock<std::mutex> lock(mtx);
+                    thread_pool->enqueue(&RaftNode::send_install_snapshot, this, node_id, install_snapshot_args);
+                }
+                for(auto &future: futures) {
+                    future.get();
+                }
+
+                // NOTE: 需要确保快照同步后再同步日志
                 
-                AppendEntriesArgs<Command> args;
+                AppendEntriesArgs<Command> append_entries_args;
                 int last_entry_index;
                 {
                     std::unique_lock<std::mutex> lock(mtx);
 
-                    args.term = current_term;
-                    args.leader_id = my_id;
-                    args.entries = log_entries;
-                    args.leader_commit = commit_index;
+                    append_entries_args.term = current_term;
+                    append_entries_args.leader_id = my_id;
+                    append_entries_args.entries = log_entries;
+                    append_entries_args.leader_commit = commit_index;
 
-                    last_entry_index = log_entries.size() - 1;
+                    last_entry_index = physical_to_logical(log_entries.size() - 1);
                 }
                 {
                     // RAFT_LOG("bg_commit\ttry sync log entries");
@@ -876,19 +900,17 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                         if(node_id == my_id) {
                             continue;
                         }
-                        {
                             std::unique_lock<std::mutex> lock(mtx);
                             if(last_entry_index < next_index[node_id]) {
                                 continue;
-                            }
-                            args.prev_log_index = next_index[node_id] - 1;
-                            args.prev_log_term = log_entries[args.prev_log_index].first;
                         }
+                        append_entries_args.prev_log_index = next_index[node_id] - 1;
+                        append_entries_args.prev_log_term = log_entries[logical_to_physical(append_entries_args.prev_log_index)].first;
 
-                        RAFT_LOG("bg_commit\tsend append entries to %d", node_id);
-                        RAFT_LOG("bg_commit\targs: term %d, leader_id %d, prev_log_index %d, prev_log_term %d, entries size %lu, leader_commit %d", args.term, args.leader_id, args.prev_log_index, args.prev_log_term, args.entries.size(), args.leader_commit);
+                        // RAFT_LOG("bg_commit\tsend append entries to %d", node_id);
+                        RAFT_LOG("bg_commit\targs: term %d, leader_id %d, prev_log_index %d, prev_log_term %d, entries size %lu, leader_commit %d", append_entries_args.term, append_entries_args.leader_id, append_entries_args.prev_log_index, append_entries_args.prev_log_term, append_entries_args.entries.size(), append_entries_args.leader_commit);
                         
-                        thread_pool->enqueue(&RaftNode::send_append_entries, this, node_id, args);
+                        thread_pool->enqueue(&RaftNode::send_append_entries, this, node_id, append_entries_args);
                     }
                 }
                 
@@ -900,7 +922,7 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                     RAFT_LOG("bg_commit\ttry upd leader commit index");
                     std::unique_lock<std::mutex> lock(mtx);
                     //NOTE: 需要更新match_index[leader_id]
-                    match_index[my_id] = log_entries.size() - 1;
+                    match_index[my_id] = physical_to_logical(log_entries.size() - 1);
 
                     auto sorted_match_index = match_index;
                     std::sort(sorted_match_index.begin(), sorted_match_index.end());
@@ -915,7 +937,7 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                         continue;
                     }
                     for(auto ci = max_commit_index; ci > commit_index; -- ci) {
-                        if(log_entries[ci].first == current_term) {
+                        if(log_entries[logical_to_physical(ci)].first == current_term) {
                             // 大多数节点都已经复制了这个日志，更新commit index
                             RAFT_LOG("bg_commit\tupdate leader commit index to %d", ci);
                             commit_index = ci;
@@ -950,7 +972,7 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
             if(commit_index > last_applied) {
                 RAFT_LOG("bg_apply\tso need to apply log entries");
                 for(int i = last_applied + 1; i <= commit_index; ++ i) {
-                    state->apply_log(log_entries[i].second);
+                    state->apply_log(log_entries[logical_to_physical(i)].second);
                 }
                 last_applied = commit_index;
             }
