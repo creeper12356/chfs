@@ -2,6 +2,7 @@
 
 #include "common/macros.h"
 #include "block/manager.h"
+#include "protocol.h"
 #include <mutex>
 #include <vector>
 #include <cstring>
@@ -27,11 +28,11 @@ public:
     // LOG mode only
     auto load_current_term() const -> int;
     auto load_voted_for() const -> int;
-    auto load_log_entries() const -> std::vector<std::pair<int, Command>>;
+    auto load_log_entries() const -> std::vector<LogEntry<Command>>;
 
     auto store_current_term(int term) -> void;
     auto store_voted_for(int voted_for) -> void;
-    auto store_log_entries(const std::vector<std::pair<int, Command>> &entries) -> void;
+    auto store_log_entries(const std::vector<LogEntry<Command>> &entries) -> void;
 
     // SNAPSHOT mode only
     auto load_snapshot() const -> std::tuple<int, int, std::vector<u8>>;
@@ -76,13 +77,13 @@ auto RaftLog<Command>::load_voted_for() const -> int
     return reinterpret_cast<int *>(block_data)[1];
 }
 template <typename Command>
-auto RaftLog<Command>::load_log_entries() const -> std::vector<std::pair<int, Command>>
+auto RaftLog<Command>::load_log_entries() const -> std::vector<LogEntry<Command>>
 {
     assert(mode_ == Mode::LOG);
     auto block_data = bm_->unsafe_get_block_ptr();
     auto base_ptr = block_data + 2 * sizeof(int);
     auto cur_ptr = base_ptr;
-    std::vector<std::pair<int, Command>> entries;
+    std::vector<LogEntry<Command>> entries;
 
     while(true) {
         int term = reinterpret_cast<int *>(cur_ptr)[0];
@@ -91,13 +92,15 @@ auto RaftLog<Command>::load_log_entries() const -> std::vector<std::pair<int, Co
             break;
         }
         cur_ptr += sizeof(int);
+        int index = reinterpret_cast<int *>(cur_ptr)[0];
+        cur_ptr += sizeof(int);
         int entry_cmd_size = reinterpret_cast<int *>(cur_ptr)[0];
         cur_ptr += sizeof(int);
 
         Command cmd;
         auto entry_cmd_data = std::vector<u8>(cur_ptr, cur_ptr + entry_cmd_size);
         cmd.deserialize(entry_cmd_data, entry_cmd_size);
-        entries.push_back(std::make_pair(term, cmd));
+        entries.push_back({term, index, cmd});
         cur_ptr += entry_cmd_size;
     }
 
@@ -120,7 +123,7 @@ auto RaftLog<Command>::store_voted_for(int voted_for) -> void
 }
 
 template <typename Command>
-auto RaftLog<Command>::store_log_entries(const std::vector<std::pair<int, Command>> &entries) -> void
+auto RaftLog<Command>::store_log_entries(const std::vector<LogEntry<Command>> &entries) -> void
 {
     assert(mode_ == Mode::LOG);
     auto block_data = bm_->unsafe_get_block_ptr();
@@ -128,13 +131,15 @@ auto RaftLog<Command>::store_log_entries(const std::vector<std::pair<int, Comman
     auto cur_ptr = base_ptr;
 
     for(const auto &log_entry: entries) {
-        reinterpret_cast<int *>(cur_ptr)[0] = log_entry.first;
+        reinterpret_cast<int *>(cur_ptr)[0] = log_entry.term;
         cur_ptr += sizeof(int);
-        auto entry_cmd_size = log_entry.second.size();
+        reinterpret_cast<int *>(cur_ptr)[0] = log_entry.index;
+        cur_ptr += sizeof(int);
+        auto entry_cmd_size = log_entry.command.size();
         reinterpret_cast<int *>(cur_ptr)[0] = entry_cmd_size;
         cur_ptr += sizeof(int);
 
-        auto entry_cmd_data = log_entry.second.serialize(entry_cmd_size);
+        auto entry_cmd_data = log_entry.command.serialize(entry_cmd_size);
         memcpy(cur_ptr, entry_cmd_data.data(), entry_cmd_size);
         cur_ptr += entry_cmd_size;
     }

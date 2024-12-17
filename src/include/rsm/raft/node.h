@@ -155,7 +155,7 @@ private:
 
     // 内存中的日志列表，每个日志条目包含<term, command> 
 
-    std::vector<std::pair<int, Command>> log_entries; 
+    std::vector<LogEntry<Command>> log_entries; 
 
     // snapshot 相关
     int snapshot_last_index; // logical
@@ -232,7 +232,7 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
         log_storage->store_voted_for(voted_for);
 
         // NOTE: 由于日志index从1开始，所以这里插入一个空的log entry
-        log_entries.push_back(std::make_pair(0, Command()));
+        log_entries.push_back(LogEntry<Command>::DummyEntry());
         log_storage->store_log_entries(log_entries);
     }
 
@@ -359,8 +359,8 @@ auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int 
         return std::make_tuple(false, current_term, -1);
     }
     
-    auto log_entry = std::make_pair(current_term, Command());
-    log_entry.second.deserialize(cmd_data, cmd_size);
+    auto log_entry = LogEntry<Command>({current_term, physical_to_logical(log_entries.size()), Command()});
+    log_entry.command.deserialize(cmd_data, cmd_size);
 
     log_entries.push_back(std::move(log_entry));
     log_storage->store_log_entries(log_entries);
@@ -376,12 +376,12 @@ auto RaftNode<StateMachine, Command>::save_snapshot() -> bool
     std::unique_lock<std::mutex> lock(mtx);
 
     snapshot_last_index = last_applied;
-    snapshot_last_term = log_entries[logical_to_physical(last_applied)].first;
+    snapshot_last_term = log_entries[logical_to_physical(last_applied)].term;
     snapshot_data = state->snapshot();
     snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
 
-    auto new_log_entries = std::vector<std::pair<int, Command>>(log_entries.begin() + logical_to_physical(last_applied + 1), log_entries.end());
-    new_log_entries.insert(new_log_entries.begin(), std::make_pair(snapshot_last_term, Command())); // dummy entry at index 0
+    auto new_log_entries = std::vector<LogEntry<Command>>(log_entries.begin() + logical_to_physical(last_applied + 1), log_entries.end());
+    new_log_entries.insert(new_log_entries.begin(), LogEntry<Command>::DummyEntry()); // dummy entry at index 0
     log_entries = new_log_entries;
     log_storage->store_log_entries(log_entries);
 
@@ -431,8 +431,8 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
         voted_for = args.candidate_id;
         // 判断candidate的LOG是否比自己新
 
-        if(args.last_log_term > log_entries.back().first // NOTE: 有可能读到dummy entry? check
-         || (args.last_log_term == log_entries.back().first && args.last_log_index >= physical_to_logical(log_entries.size() - 1)) ){
+        if(args.last_log_term > log_entries.back().term // NOTE: 有可能读到dummy entry? check
+         || (args.last_log_term == log_entries.back().term && args.last_log_index >= physical_to_logical(log_entries.size() - 1)) ){
             RAFT_LOG("req_vote\tvote granted for %d", args.candidate_id);
             return RequestVoteReply{current_term, true};
         } else {
@@ -533,9 +533,9 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
             return AppendEntriesReply{current_term, false};
         }
 
-        if(log_entries[logical_to_physical(rpc_arg.prev_log_index)].first != rpc_arg.prev_log_term) {
+        if(log_entries[logical_to_physical(rpc_arg.prev_log_index)].term != rpc_arg.prev_log_term) {
             // 来自leader的prev_log_index位置的term与自己的term不一致
-            RAFT_LOG("app_ent\treject cuz term not match, %d != %d", log_entries[logical_to_physical(rpc_arg.prev_log_index)].first, rpc_arg.prev_log_term);
+            RAFT_LOG("app_ent\treject cuz term not match, %d != %d", log_entries[logical_to_physical(rpc_arg.prev_log_index)].term, rpc_arg.prev_log_term);
             return AppendEntriesReply{current_term, false};
         }
 
@@ -545,8 +545,8 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
         log_entries.resize(log_entries_final_size);
         for(int i = rpc_arg.prev_log_index + 1; i < log_entries_final_size; ++ i) {
             auto &rpc_entry = rpc_arg.entries[logical_to_physical(i)];
-            auto entry = std::make_pair(rpc_entry.first, Command());
-            entry.second.deserialize(rpc_entry.second, rpc_entry.second.size());
+            auto entry = LogEntry<Command>({std::get<0>(rpc_entry), i, Command()});
+            entry.command.deserialize(std::get<2>(rpc_entry), std::get<2>(rpc_entry).size());
             log_entries[logical_to_physical(i)] = std::move(entry);
         }
         log_storage->store_log_entries(log_entries);
@@ -599,7 +599,7 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
         auto new_arg = arg;
         -- next_index[node_id];
         new_arg.prev_log_index = next_index[node_id] - 1;
-        new_arg.prev_log_term = log_entries[logical_to_physical(new_arg.prev_log_index)].first;
+        new_arg.prev_log_term = log_entries[logical_to_physical(new_arg.prev_log_index)].term;
         thread_pool->enqueue(&RaftNode::send_append_entries, this, node_id, new_arg);
     }
 }
@@ -635,7 +635,7 @@ auto RaftNode<StateMachine, Command>::install_snapshot(InstallSnapshotArgs args)
     bool log_has_snapshot_last_entry = false;
     auto log_entries_size = log_entries.size();
     for(int i = 1; i < log_entries_size; ++ i) {
-        if(physical_to_logical(i) == args.last_included_index && log_entries[i].first == args.last_included_term) {
+        if(physical_to_logical(i) == args.last_included_index && log_entries[i].term == args.last_included_term) {
             log_has_snapshot_last_entry = true;
             break;
         }
@@ -643,15 +643,15 @@ auto RaftNode<StateMachine, Command>::install_snapshot(InstallSnapshotArgs args)
 
     if(log_has_snapshot_last_entry) {
         // 截断日志，只保留last_included_index之后的日志
-        auto new_log_entries = std::vector<std::pair<int, Command>>(log_entries.begin() + logical_to_physical(args.last_included_index) + 1, log_entries.end());
-        new_log_entries.insert(new_log_entries.begin(), std::make_pair(0, Command())); // dummy entry at index 0
+        auto new_log_entries = std::vector<LogEntry<Command>>(log_entries.begin() + logical_to_physical(args.last_included_index) + 1, log_entries.end());
+        new_log_entries.insert(new_log_entries.begin(), LogEntry<Command>::DummyEntry()); // dummy entry at index 0
         log_entries = new_log_entries;
         commit_index = std::max<int>(commit_index, args.last_included_index);
 
     } else {
         // 清空所有日志
         log_entries.clear();
-        log_entries.push_back(std::make_pair(0, Command())); // dummy entry at index 0
+        log_entries.push_back(LogEntry<Command>::DummyEntry()); // dummy entry at index 0
         commit_index = args.last_included_index;
     }
     
@@ -795,7 +795,7 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                     request_vote_args.term = current_term;
                     request_vote_args.candidate_id = my_id;
                     request_vote_args.last_log_index = physical_to_logical(log_entries.size() - 1);
-                    request_vote_args.last_log_term = log_entries.back().first;
+                    request_vote_args.last_log_term = log_entries.back().term;
                 }
 
                 std::vector<std::future<void>> futures;
@@ -857,29 +857,6 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                         node_ids.push_back(pair.first);
                     }
                 }
-
-                InstallSnapshotArgs install_snapshot_args;
-                {
-                    std::unique_lock<std::mutex> lock(mtx);
-                    install_snapshot_args.term = current_term;
-                    install_snapshot_args.leader_id = my_id;
-                    install_snapshot_args.last_included_index = snapshot_last_index;
-                    install_snapshot_args.last_included_term = snapshot_last_term;
-                    install_snapshot_args.data = snapshot_data;
-                }
-                std::vector<std::future<void>> futures;
-                for(auto &node_id: node_ids) {
-                    if(node_id == my_id) {
-                        continue;
-                    }
-                    std::unique_lock<std::mutex> lock(mtx);
-                    thread_pool->enqueue(&RaftNode::send_install_snapshot, this, node_id, install_snapshot_args);
-                }
-                for(auto &future: futures) {
-                    future.get();
-                }
-
-                // NOTE: 需要确保快照同步后再同步日志
                 
                 AppendEntriesArgs<Command> append_entries_args;
                 int last_entry_index;
@@ -905,7 +882,7 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                                 continue;
                         }
                         append_entries_args.prev_log_index = next_index[node_id] - 1;
-                        append_entries_args.prev_log_term = log_entries[logical_to_physical(append_entries_args.prev_log_index)].first;
+                        append_entries_args.prev_log_term = log_entries[logical_to_physical(append_entries_args.prev_log_index)].term;
 
                         // RAFT_LOG("bg_commit\tsend append entries to %d", node_id);
                         RAFT_LOG("bg_commit\targs: term %d, leader_id %d, prev_log_index %d, prev_log_term %d, entries size %lu, leader_commit %d", append_entries_args.term, append_entries_args.leader_id, append_entries_args.prev_log_index, append_entries_args.prev_log_term, append_entries_args.entries.size(), append_entries_args.leader_commit);
@@ -937,7 +914,7 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                         continue;
                     }
                     for(auto ci = max_commit_index; ci > commit_index; -- ci) {
-                        if(log_entries[logical_to_physical(ci)].first == current_term) {
+                        if(log_entries[logical_to_physical(ci)].term == current_term) {
                             // 大多数节点都已经复制了这个日志，更新commit index
                             RAFT_LOG("bg_commit\tupdate leader commit index to %d", ci);
                             commit_index = ci;
@@ -972,7 +949,7 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
             if(commit_index > last_applied) {
                 RAFT_LOG("bg_apply\tso need to apply log entries");
                 for(int i = last_applied + 1; i <= commit_index; ++ i) {
-                    state->apply_log(log_entries[logical_to_physical(i)].second);
+                    state->apply_log(log_entries[logical_to_physical(i)].command);
                 }
                 last_applied = commit_index;
             }
