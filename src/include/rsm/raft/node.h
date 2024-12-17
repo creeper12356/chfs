@@ -243,6 +243,8 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
 
         std::tie(snapshot_last_index, snapshot_last_term, snapshot_data) = snapshot_storage->load_snapshot();
         state->apply_snapshot(snapshot_data);
+        last_applied = snapshot_last_index;
+        commit_index = snapshot_last_index;
     } else {
         auto bm = std::make_shared<BlockManager>(node_snapshot_filename);
         snapshot_storage = std::make_unique<RaftLog<Command>>(bm, RaftLog<Command>::Mode::SNAPSHOT);
@@ -375,15 +377,21 @@ auto RaftNode<StateMachine, Command>::save_snapshot() -> bool
 {
     std::unique_lock<std::mutex> lock(mtx);
 
-    snapshot_last_index = last_applied;
+    auto new_snapshot_last_index = last_applied;
     snapshot_last_term = log_entries[logical_to_physical(last_applied)].term;
     snapshot_data = state->snapshot();
-    snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
 
     auto new_log_entries = std::vector<LogEntry<Command>>(log_entries.begin() + logical_to_physical(last_applied + 1), log_entries.end());
     new_log_entries.insert(new_log_entries.begin(), LogEntry<Command>::DummyEntry()); // dummy entry at index 0
     log_entries = new_log_entries;
+
+    // NOTE: 必须最后更新snapshot_last_index!
+    snapshot_last_index = new_snapshot_last_index;
     log_storage->store_log_entries(log_entries);
+    snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
+
+    RAFT_LOG("save_snap\tlast_applied: %d, snapshot_last_index: %d, snapshot_last_term: %d", last_applied, snapshot_last_index, snapshot_last_term);
+    RAFT_LOG("savve_snap\tnew log_entries size: %d", static_cast<int>(log_entries.size()));
 
     return true;
 }
@@ -430,13 +438,17 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
         log_storage->store_voted_for(args.candidate_id);
         voted_for = args.candidate_id;
         // 判断candidate的LOG是否比自己新
+        // NOTE: 需要考虑snapshot的情况
+        auto last_log_entry_term = log_entries.size() == 1 ? snapshot_last_term : log_entries.back().term;
+        auto last_log_entry_index = log_entries.size() == 1 ? snapshot_last_index : physical_to_logical(log_entries.size() - 1);
 
-        if(args.last_log_term > log_entries.back().term // NOTE: 有可能读到dummy entry? check
-         || (args.last_log_term == log_entries.back().term && args.last_log_index >= physical_to_logical(log_entries.size() - 1)) ){
+        if(args.last_log_term > last_log_entry_term
+         || (args.last_log_term == last_log_entry_term && args.last_log_index >= last_log_entry_index) ){
             RAFT_LOG("req_vote\tvote granted for %d", args.candidate_id);
             return RequestVoteReply{current_term, true};
         } else {
             RAFT_LOG("req_vote\tvote denied. candidate's log is not up-to-date");
+            RAFT_LOG("req_vote\tlast_log_term %d, last_log_index %d, args.last_log_term %d, args.last_log_index %d", last_log_entry_term, last_log_entry_index, args.last_log_term, args.last_log_index);
         }
     }
     RAFT_LOG("req_vote\tvote denied.");
@@ -526,15 +538,17 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     } else {
         // 接收leader的追加日志请求
         RAFT_LOG("app_ent\treceive append entries from %d", arg.leader_id);
+        RAFT_LOG("app_ent\targ.prev_log_index: %d, logical_bound: %d", arg.prev_log_index, physical_to_logical(log_entries.size()));
         if(arg.prev_log_index >= physical_to_logical(log_entries.size())) {
             // 来自prev_log_index位置不存在log entry
             RAFT_LOG("app_ent\treject cuz no such log entry at %d", arg.prev_log_index);
             return AppendEntriesReply{current_term, false};
         }
-
-        if(log_entries[logical_to_physical(arg.prev_log_index)].term != arg.prev_log_term) {
+        
+        auto this_compared_term = arg.prev_log_index == snapshot_last_index ? snapshot_last_term : log_entries[logical_to_physical(arg.prev_log_index)].term;
+        if(arg.prev_log_term != this_compared_term) {
             // 来自leader的prev_log_index位置的term与自己的term不一致
-            RAFT_LOG("app_ent\treject cuz term not match, %d != %d", log_entries[logical_to_physical(arg.prev_log_index)].term, arg.prev_log_term);
+            RAFT_LOG("app_ent\treject cuz term not match: arg.prev_log_term %d, log_entries[prev_log_index].term %d", arg.prev_log_term, this_compared_term);
             return AppendEntriesReply{current_term, false};
         }
 
@@ -599,11 +613,37 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
     } else {
         // AppendEntries失败，减小next_index，重试
         RAFT_LOG("send_app_ent\tappend fail, retry");
-        auto new_arg = arg;
-        -- next_index[node_id];
-        new_arg.prev_log_index = next_index[node_id] - 1;
-        new_arg.prev_log_term = log_entries[logical_to_physical(new_arg.prev_log_index)].term;
-        thread_pool->enqueue(&RaftNode::send_append_entries, this, node_id, new_arg);
+        RAFT_LOG("send_app_ent\tnext_index[%d] %d, snapshot_last_index %d", node_id, next_index[node_id], snapshot_last_index);
+        RAFT_LOG("send_app_ent\tso choose %s", next_index[node_id] <= snapshot_last_index ? "install snapshot" : "append entries");
+        if(next_index[node_id] <= snapshot_last_index) {
+            InstallSnapshotArgs install_snapshot_args;
+            install_snapshot_args.term = current_term;
+            install_snapshot_args.leader_id = my_id;
+            install_snapshot_args.last_included_index = snapshot_last_index;
+            install_snapshot_args.last_included_term = snapshot_last_term;
+            install_snapshot_args.data = snapshot_data;
+
+            RAFT_LOG("send_app_ent\tsend install snapshot to %d", node_id);
+            RAFT_LOG("send_app_ent\targs: term %d, leader_id %d, last_included_index %d, last_included_term %d, data size %lu", install_snapshot_args.term, install_snapshot_args.leader_id, install_snapshot_args.last_included_index, install_snapshot_args.last_included_term, install_snapshot_args.data.size());
+
+            thread_pool->enqueue(&RaftNode::send_install_snapshot, this, node_id, install_snapshot_args);
+        } else {
+            auto append_entries_args = arg;
+            -- next_index[node_id];
+            append_entries_args.prev_log_index = next_index[node_id] - 1;
+            if(append_entries_args.prev_log_index == snapshot_last_index)
+            {
+                append_entries_args.prev_log_term = snapshot_last_term;
+            } else {
+                append_entries_args.prev_log_term = log_entries[logical_to_physical(append_entries_args.prev_log_index)].term;
+            }
+
+            RAFT_LOG("send_app_ent\tsend append entries to %d", node_id);
+            RAFT_LOG("send_app_ent\targs: term %d, leader_id %d, prev_log_index %d, prev_log_term %d, entries size %lu, leader_commit %d", append_entries_args.term, append_entries_args.leader_id, append_entries_args.prev_log_index, append_entries_args.prev_log_term, append_entries_args.entries.size(), append_entries_args.leader_commit);
+
+            thread_pool->enqueue(&RaftNode::send_append_entries, this, node_id, append_entries_args);
+        }
+        
     }
 }
 
@@ -666,6 +706,7 @@ auto RaftNode<StateMachine, Command>::install_snapshot(InstallSnapshotArgs args)
 
     // apply immediately to rsm
     state->apply_snapshot(snapshot_data);
+    RAFT_LOG("install_snap\tupd last_applied to %d", args.last_included_index);
     last_applied = args.last_included_index;
 
     // persist log entries
@@ -749,6 +790,7 @@ void RaftNode<StateMachine, Command>::send_install_snapshot(int target_id, Insta
     std::unique_lock<std::mutex> clients_lock(clients_mtx);
     if (rpc_clients_map[target_id] == nullptr
         || rpc_clients_map[target_id]->get_connection_state() != rpc::client::connection_state::connected) {
+        RAFT_LOG("send_ins_snap\tnot connected to %d", target_id);
         return;
     }
 
@@ -813,8 +855,15 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                     role = RaftRole::Candidate;
                     request_vote_args.term = current_term;
                     request_vote_args.candidate_id = my_id;
-                    request_vote_args.last_log_index = physical_to_logical(log_entries.size() - 1);
-                    request_vote_args.last_log_term = log_entries.back().term;
+                    // NOTE: 需要考虑snapshot的情况
+                    RAFT_LOG("req_vote\tlog_entries size %lu", log_entries.size());
+                    if(log_entries.size() == 1) {
+                        RAFT_LOG("req_vote\tchoose snapshot_last_index %d, snapshot_last_term %d", snapshot_last_index, snapshot_last_term);
+                    } else {
+                        RAFT_LOG("req_vote\tchoose last log index %d, last log term %d", physical_to_logical(log_entries.size() - 1), log_entries.back().term);
+                    }
+                    request_vote_args.last_log_index = log_entries.size() == 1 ? snapshot_last_index : physical_to_logical(log_entries.size() - 1);
+                    request_vote_args.last_log_term = log_entries.size() == 1 ? snapshot_last_term : log_entries.back().term;
                 }
 
                 std::vector<std::future<void>> futures;
@@ -886,6 +935,8 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                     if(physical_to_logical(log_entries.size() - 1) < next_index[node_id]) {
                         continue;
                     }
+                    RAFT_LOG("bg_commit\tnext_index[%d] %d, snapshot_last_index %d", node_id, next_index[node_id], snapshot_last_index);
+                    RAFT_LOG("bg_commit\tso choose %s", next_index[node_id] <= snapshot_last_index ? "install snapshot" : "append entries");
 
                     if(next_index[node_id] <= snapshot_last_index) {
                         InstallSnapshotArgs install_snapshot_args;
@@ -904,7 +955,11 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
                         append_entries_args.term = current_term;
                         append_entries_args.leader_id = my_id;
                         append_entries_args.prev_log_index = next_index[node_id] - 1;
-                        append_entries_args.prev_log_term = log_entries[logical_to_physical(append_entries_args.prev_log_index)].term;
+                        if(append_entries_args.prev_log_index == snapshot_last_index) {
+                            append_entries_args.prev_log_term = snapshot_last_term;
+                        } else {
+                            append_entries_args.prev_log_term = log_entries[logical_to_physical(append_entries_args.prev_log_index)].term;
+                        }
                         append_entries_args.entries = log_entries;
                         append_entries_args.leader_commit = commit_index;
 
