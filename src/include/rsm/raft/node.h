@@ -124,6 +124,7 @@ private:
 
     std::unique_ptr<ThreadPool> thread_pool; // thread-safe itself
     std::unique_ptr<RaftLog<Command>> log_storage;     /* To persist the raft log. */
+    std::unique_ptr<RaftLog<Command>> snapshot_storage; 
     std::unique_ptr<StateMachine> state;  /*  The state machine that applies the raft log, e.g. a kv store. */
 
     std::unique_ptr<RpcServer> rpc_server;      /* RPC server to recieve and handle the RPC requests. */
@@ -146,7 +147,7 @@ private:
     int voted_for = -1; 
 
     int commit_index = 0; 
-    int last_applied = 0; 
+    int last_applied = 0;  // logical index
 
     int vote_count = 0; 
 
@@ -155,6 +156,20 @@ private:
     // 内存中的日志列表，每个日志条目包含<term, command> 
 
     std::vector<std::pair<int, Command>> log_entries; 
+
+    // snapshot 相关
+    int snapshot_last_index; // logical
+    int snapshot_last_term;
+
+    std::vector<u8> snapshot_data;
+
+    int logical_to_physical(int logical_index) const {
+        return logical_index - snapshot_last_index;
+    }
+
+    int physical_to_logical(int physical_index) const {
+        return physical_index + snapshot_last_index;
+    }
 
     // leaders-only member
     std::vector<int> next_index;
@@ -196,12 +211,12 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
 
 
     // 初始化日志持久化存储
-    auto node_log_filename = "/tmp/raft_log/" + std::to_string(my_id);
+    auto node_log_filename = "/tmp/raft_log/" + std::to_string(my_id) + ".log";
 
     if(is_file_exist(node_log_filename)) {
         // 从持久化存储中加载数据
         auto bm = std::make_shared<BlockManager>(node_log_filename);
-        log_storage = std::make_unique<RaftLog<Command>>(bm);
+        log_storage = std::make_unique<RaftLog<Command>>(bm, RaftLog<Command>::Mode::LOG);
         
         current_term = log_storage->load_current_term();
         voted_for = log_storage->load_voted_for();
@@ -209,7 +224,7 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
     } else {
         // 初始化持久化存储
         auto bm = std::make_shared<BlockManager>(node_log_filename);
-        log_storage = std::make_unique<RaftLog<Command>>(bm);
+        log_storage = std::make_unique<RaftLog<Command>>(bm, RaftLog<Command>::Mode::LOG);
 
         assert(current_term == 0);
         log_storage->store_current_term(current_term);
@@ -219,6 +234,24 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
         // NOTE: 由于日志index从1开始，所以这里插入一个空的log entry
         log_entries.push_back(std::make_pair(0, Command()));
         log_storage->store_log_entries(log_entries);
+    }
+
+    auto node_snapshot_filename = "/tmp/raft_log/" + std::to_string(my_id) + ".snapshot";
+    if(is_file_exist(node_snapshot_filename)) {
+        auto bm = std::make_shared<BlockManager>(node_snapshot_filename);
+        snapshot_storage = std::make_unique<RaftLog<Command>>(bm, RaftLog<Command>::Mode::SNAPSHOT);
+
+        std::tie(snapshot_last_index, snapshot_last_term, snapshot_data) = snapshot_storage->load_snapshot();
+        state->apply_snapshot(snapshot_data);
+    } else {
+        auto bm = std::make_shared<BlockManager>(node_snapshot_filename);
+        snapshot_storage = std::make_unique<RaftLog<Command>>(bm, RaftLog<Command>::Mode::SNAPSHOT);
+
+        snapshot_last_index = 0;
+        snapshot_last_term = 0;
+        snapshot_data = state->snapshot();
+
+        snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
     }
 
 
@@ -332,23 +365,34 @@ auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int 
     log_entries.push_back(std::move(log_entry));
     log_storage->store_log_entries(log_entries);
 
-    RAFT_LOG("new_cmd\tlog entry added, log index: %d", static_cast<int>(log_entries.size() - 1));
+    RAFT_LOG("new_cmd\tlog entry added, log index: %d", static_cast<int>(physical_to_logical(log_entries.size() - 1)));
 
-    return std::make_tuple(true, current_term, log_entries.size() - 1);
+    return std::make_tuple(true, current_term, physical_to_logical(log_entries.size() - 1));
 }
 
 template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::save_snapshot() -> bool
 {
-    /* Lab3: Your code here */ 
+    std::unique_lock<std::mutex> lock(mtx);
+
+    snapshot_last_index = last_applied;
+    snapshot_last_term = log_entries[logical_to_physical(last_applied)].first;
+    snapshot_data = state->snapshot();
+    snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
+
+    auto new_log_entries = std::vector<std::pair<int, Command>>(log_entries.begin() + logical_to_physical(last_applied) + 1, log_entries.end());
+    new_log_entries.insert(new_log_entries.begin(), std::make_pair(snapshot_last_term, Command())); // dummy entry at index 0
+    log_entries = new_log_entries;
+    log_storage->store_log_entries(log_entries);
+
     return true;
 }
 
 template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::get_snapshot() -> std::vector<u8>
 {
-    /* Lab3: Your code here */
-    return std::vector<u8>();
+    std::unique_lock<std::mutex> lock(mtx);
+    return state->snapshot();
 }
 
 /******************************************************************
@@ -563,8 +607,67 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
 template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::install_snapshot(InstallSnapshotArgs args) -> InstallSnapshotReply
 {
-    /* Lab3: Your code here */
-    return InstallSnapshotReply();
+    std::unique_lock<std::mutex> lock(mtx);
+    if(args.term < current_term) {
+        RAFT_LOG("install_snap\tterm too old");
+        return InstallSnapshotReply{current_term};
+    }
+    if(args.term > current_term) {
+        RAFT_LOG("install_snap\tterm update and become follower");
+
+        log_storage->store_current_term(args.term);
+        current_term = args.term;
+
+        role = RaftRole::Follower;
+        leader_id = args.leader_id;
+
+        log_storage->store_voted_for(-1);
+        voted_for = -1;
+    }
+
+    if(args.last_included_index <= snapshot_last_index) {
+        RAFT_LOG("install_snap\treject cuz already installed");
+        return InstallSnapshotReply{current_term};
+    }
+
+    // 检查日志中是否包含snapshot的最后一个entry
+    bool log_has_snapshot_last_entry = false;
+    auto log_entries_size = log_entries.size();
+    for(int i = 1; i < log_entries_size; ++ i) {
+        if(physical_to_logical(i) == args.last_included_index && log_entries[i].first == args.last_included_term) {
+            log_has_snapshot_last_entry = true;
+            break;
+        }
+    }
+
+    if(log_has_snapshot_last_entry) {
+        // 截断日志，只保留last_included_index之后的日志
+        auto new_log_entries = std::vector<std::pair<int, Command>>(log_entries.begin() + logical_to_physical(args.last_included_index) + 1, log_entries.end());
+        new_log_entries.insert(new_log_entries.begin(), std::make_pair(0, Command())); // dummy entry at index 0
+        log_entries = new_log_entries;
+        commit_index = std::max<int>(commit_index, args.last_included_index);
+
+    } else {
+        // 清空所有日志
+        log_entries.clear();
+        log_entries.push_back(std::make_pair(0, Command())); // dummy entry at index 0
+        commit_index = args.last_included_index;
+    }
+    
+    // 更新snapshot
+    snapshot_last_index = args.last_included_index;
+    snapshot_last_term = args.last_included_term;
+    snapshot_data = args.data;
+    snapshot_storage->store_snapshot(snapshot_last_index, snapshot_last_term, snapshot_data);
+
+    // apply immediately to rsm
+    state->apply_snapshot(snapshot_data);
+    last_applied = args.last_included_index;
+
+    // persist log entries
+    log_storage->store_log_entries(log_entries);
+
+    return InstallSnapshotReply{current_term};
 }
 
 
