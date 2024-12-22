@@ -117,6 +117,13 @@ public:
   auto free_block(block_id_t block_id) -> bool;
 
 private:
+  auto read_block_version(block_id_t block_id) -> version_t;
+
+  auto update_block_version(block_id_t block_id, version_t version) -> bool;
+
+  auto retrieve_block_version_pos(block_id_t block_id) -> std::pair<block_id_t, usize>;
+
+private:
   std::unique_ptr<RpcServer> server_;
   std::shared_ptr<BlockAllocator> block_allocator_;
 };

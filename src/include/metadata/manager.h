@@ -35,8 +35,8 @@ class InodeManager {
   friend class FileOperation;
   // We will modify the block manager
   std::shared_ptr<BlockManager> bm;
-  u64 max_inode_supported;
-  u64 n_table_blocks;
+  u64 max_inode_supported; // 最多支持的inode数量
+  u64 n_table_blocks; // 存储inode table的block数量
   u64 n_bitmap_blocks;
 
 public:

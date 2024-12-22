@@ -56,6 +56,11 @@ const u8 RegularFileType = 1;
 const u8 DirectoryType = 2;
 
 using BlockInfo = std::tuple<block_id_t, mac_id_t, version_t>;
+using BlockInfoStruct = struct {
+  block_id_t block_id;
+  mac_id_t mac_id;
+  version_t version;
+};
 
 class MetadataServer {
   const size_t num_worker_threads = 4; // worker threads for rpc handlers
@@ -108,6 +113,9 @@ public:
   auto mknode(u8 type, inode_id_t parent, const std::string &name)
       -> inode_id_t;
 
+  auto mknode_atomic(u8 type, inode_id_t parent, const std::string &name)
+      -> inode_id_t;
+
   /**
    * A RPC handler for client. It deletes an file on metadata server from its
    * parent.
@@ -117,12 +125,24 @@ public:
    */
   auto unlink(inode_id_t parent, const std::string &name) -> bool;
 
+  auto unlink_atomic(inode_id_t parent, const std::string &name) -> bool;
+
+
+    /**
+   * Remove the file corresponding to an inode. (distributed)
+   *
+   * @param id the id of the inode
+   * @return whether the remove is ok
+   */
+  auto remove_file(inode_id_t) -> ChfsNullResult;
+
+
   /**
    * A RPC handler for client. It looks up the dir and return the inode id of
    * the given name.
    *
    * @param parent: The parent directory of the node to be found.
-   * @param name: The name of the node to be removed.
+   * @param name: The name of the node to be removed. 
    */
   auto lookup(inode_id_t parent, const std::string &name) -> inode_id_t;
 
@@ -168,6 +188,10 @@ public:
    * @return: a tuple of <size, atime, mtime, ctime, type>
    */
   auto get_type_attr(inode_id_t id) -> std::tuple<u64, u64, u64, u64, u8>;
+
+  auto get_block_size() -> usize {
+    return operation_->block_manager_->block_size();
+  }
 
   /**
    * Register a data server to the metadata server. It'll create a RPC
@@ -216,6 +240,22 @@ public:
 
 private:
   /**
+   * @brief 通过向data server轮询，直到分配一个block
+   * @param id inode id
+   * @return 分配的block信息
+   */
+  auto poll_allocate_block(inode_id_t id) -> BlockInfo;
+
+  auto handle_last_direct_block_not_full(BlockInfoStruct *last_direct_block_info_arr, BlockInfoStruct block_info_struct, u8 *last_direct_block_data, block_id_t last_direct_block_id) -> bool;
+
+  /**
+   * @brief 处理最后一个direct block已满的情况
+   * @return 是否成功
+   */
+  auto handle_last_direct_block_full(BlockInfoStruct block_info_struct, Inode *inode_p, u8 *inode_data, block_id_t inode_bid, usize last_direct_block_id_idx, bool need_indirect) -> bool;
+
+private:
+  /**
    * Helper function for binding rpc handlers
    */
   inline auto bind_handlers();
@@ -242,9 +282,10 @@ private:
   bool may_failed_;
   [[maybe_unused]] bool is_checkpoint_enabled_;
 
-  /**
-   * {You can add anything you want here}
-   */
+
+  // handler mutex
+  std::mutex global_lock_;
+
 };
 
 } // namespace chfs

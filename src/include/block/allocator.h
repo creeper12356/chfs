@@ -69,6 +69,10 @@ public:
   BlockAllocator(std::shared_ptr<BlockManager> bm, usize bitmap_block_id,
                  bool will_initialize = true);
 
+  auto first_bitmap_block_id() const -> block_id_t {
+    return this->bitmap_block_id;
+  }
+
   auto total_bitmap_block() -> usize { return this->bitmap_block_cnt; }
 
   /**
