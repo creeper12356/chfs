@@ -189,6 +189,16 @@ public:
    */
   auto get_type_attr(inode_id_t id) -> std::tuple<u64, u64, u64, u64, u8>;
 
+  /**
+   * @brief 设置文件的大小元数据，用于lab4
+   * 
+   * @param id 
+   * @param size 
+   * 
+   * @return 是否设置成功
+   */
+  auto set_file_size(inode_id_t id, u64 size) -> bool;
+
   auto get_block_size() -> usize {
     return operation_->block_manager_->block_size();
   }

@@ -27,6 +27,8 @@ inline auto MetadataServer::bind_handlers() {
   server_->bind("readdir", [this](inode_id_t id) { return this->readdir(id); });
   server_->bind("get_type_attr",
                 [this](inode_id_t id) { return this->get_type_attr(id); });
+  server_->bind("set_file_size",
+                [this](inode_id_t id, u64 size) { return this->set_file_size(id, size); });
   server_->bind("get_block_size", [this]() {
     return this->operation_->block_manager_->block_size();
   });
@@ -786,17 +788,43 @@ auto MetadataServer::get_type_attr(inode_id_t id)
   // 但是此处为了方便，直接计算文件大小并返回 :(
   auto inode_p = reinterpret_cast<Inode *>(inode_buffer.data());
   auto inode_attr = inode_p->get_attr();
-  auto inode_attr_size = inode_p->get_size();
+  // auto inode_attr_size = inode_p->get_size();
 
-  inode_attr_size = get_block_map(id).size() * block_size;
+  // inode_attr_size = get_block_map(id).size() * block_size;
 
+  // NOTE: lab4又变成直接返回文件大小，可能导致之前的测试无法通过
   return std::make_tuple(
-    inode_attr_size,
+    inode_attr.size,
     inode_attr.atime,
     inode_attr.mtime,
     inode_attr.ctime,
     static_cast<u8>(inode_p->get_type())
   );
+}
+
+auto MetadataServer::set_file_size(inode_id_t id, u64 size) -> bool {
+  auto inode_bid_res = operation_->inode_manager_->get(id);
+  if(inode_bid_res.is_err()) {
+    return false;
+  }
+  auto inode_bid = inode_bid_res.unwrap();
+  auto block_size = operation_->block_manager_->block_size();
+
+  std::vector<u8> inode_buffer(block_size);
+  auto read_inode_res = operation_->block_manager_->read_block(inode_bid, inode_buffer.data());
+  if(read_inode_res.is_err()) {
+    return false;
+  }
+
+  auto inode_p = reinterpret_cast<Inode *>(inode_buffer.data());
+  inode_p->set_size(size);
+
+  auto write_inode_res = operation_->block_manager_->write_block(inode_bid, inode_buffer.data());
+  if(write_inode_res.is_err()) {
+    return false;
+  }
+
+  return true;
 }
 
 auto MetadataServer::reg_server(const std::string &address, u16 port,

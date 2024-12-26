@@ -54,7 +54,7 @@ namespace mapReduce {
     class Coordinator {
     public:
         Coordinator(MR_CoordinatorConfig config, const std::vector<std::string> &files, int nReduce);
-        std::tuple<int, int> askTask(int);
+        std::tuple<int, int, int, std::string> askTask(int);
         int submitTask(int taskType, int index);
         bool Done();
 
@@ -63,6 +63,27 @@ namespace mapReduce {
         std::mutex mtx;
         bool isFinished;
         std::unique_ptr<chfs::RpcServer> rpc_server;
+        
+        /**
+         * @brief map任务状态
+         * 
+         * 大小：files.size()
+         * ele.first: 是否已分配
+         * ele.second: 是否完成
+         * 未分配一定未完成
+         * 
+         */
+        std::vector<std::pair<bool, bool>> map_tasks;
+
+        /**
+         * @brief reduce任务状态
+         * 
+         * 大小：nReduce
+         * ele.first: 是否已分配
+         * ele.second: 是否完成
+         * 未分配一定未完成
+         */
+        std::vector<std::pair<bool, bool>> reduce_tasks;
     };
 
     class Worker {
@@ -76,10 +97,16 @@ namespace mapReduce {
         void doReduce(int index, int nfiles);
         void doSubmit(mr_tasktype taskType, int index);
 
-        std::string outPutFile;
-        std::unique_ptr<chfs::RpcClient> mr_client;
-        std::shared_ptr<chfs::ChfsClient> chfs_client;
-        std::unique_ptr<std::thread> work_thread;
-        bool shouldStop = false;
+        std::string outPutFile; //* reduce worker 输出文件名
+        std::unique_ptr<chfs::RpcClient> mr_client; //* 向coordinator发送请求的客户端
+        std::shared_ptr<chfs::ChfsClient> chfs_client; //* 分布式文件系统客户端
+        std::unique_ptr<std::thread> work_thread; //* 后台工作线程
+        bool shouldStop = false; //* 是否停止工作
+
+        int n_map; 
+        int n_reduce;
+        int worker_id;
+
+        static int worker_cnt;
     };
 }

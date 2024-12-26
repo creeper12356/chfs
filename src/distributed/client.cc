@@ -77,10 +77,10 @@ auto ChfsClient::get_type_attr(inode_id_t id)
     .unwrap()->as<std::tuple<u64, u64, u64, u64, u8>>();
 
 
-  std::cout << "atime: " << std::get<1>(res) << std::endl;
-  std::cout << "mtime: " << std::get<2>(res) << std::endl;
-  std::cout << "ctime: " << std::get<3>(res) << std::endl;
-  std::cout << "size: " << std::get<0>(res) << std::endl;
+  // std::cout << "atime: " << std::get<1>(res) << std::endl;
+  // std::cout << "mtime: " << std::get<2>(res) << std::endl;
+  // std::cout << "ctime: " << std::get<3>(res) << std::endl;
+  // std::cout << "size: " << std::get<0>(res) << std::endl;
 
   return std::make_pair(static_cast<InodeType>(std::get<4>(res)), 
                         FileAttr{
@@ -107,10 +107,10 @@ auto ChfsClient::read_file(inode_id_t id, usize offset, usize size)
   auto read_set = cal_nonempty_data_sequence(offset, size, block_size);
 
   // print read_set
-  std::cout << "read_set: " << std::endl;
-  for(auto &read_op: read_set) {
-    std::cout << std::get<0>(read_op) << " " << std::get<1>(read_op) << " " << std::get<2>(read_op) << std::endl;
-  }
+  // std::cout << "read_set: " << std::endl;
+  // for(auto &read_op: read_set) {
+  //   std::cout << std::get<0>(read_op) << " " << std::get<1>(read_op) << " " << std::get<2>(read_op) << std::endl;
+  // }
 
   for(auto &read_op: read_set) {
     auto block_info = block_map[std::get<0>(read_op)];
@@ -148,7 +148,7 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
   auto write_set = cal_nonempty_data_sequence(offset, size, block_size);
 
   // print write_set
-  std::cout << "write_set: " << std::endl;
+  // std::cout << "write_set: " << std::endl;
   for(auto &write_op: write_set) {
     std::cout << std::get<0>(write_op) << " " << std::get<1>(write_op) << " " << std::get<2>(write_op) << std::endl;
   }
@@ -180,7 +180,14 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
     data_cursor += std::get<2>(write_op);
   }
 
-  std::cout << "client successfully write data" << std::endl;
+  // 更新文件大小
+  // TODO: 将更新文件大小的逻辑移到外面，防止影响lab2测试
+  auto set_size_res = metadata_server_->call("set_file_size", id, offset + size);
+  if(set_size_res.is_err()) {
+    return ChfsNullResult(ErrorType::BadResponse);
+  }
+
+  // std::cout << "client successfully write data" << std::endl;
   return KNullOk;
 }
 

@@ -121,6 +121,11 @@ public:
   auto get_size() const -> u64 { return inner_attr.size; }
 
   /**
+   * Set the file size
+   */
+  auto set_size(u64 size) -> void { inner_attr.size = size;}
+
+  /**
    * Get the number of blocks of the inode
    */
   auto get_nblocks() const -> u32 { return nblocks; }
