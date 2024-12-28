@@ -7,7 +7,7 @@
 
 #include "map_reduce/protocol.h"
 
-#if 1
+#if 0
 #define MR_CD_LOG(fmt, args...)                                                                                   \
     {auto now =                                                                                               \
         std::chrono::duration_cast<std::chrono::milliseconds>(                                               \

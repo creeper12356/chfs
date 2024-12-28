@@ -29,11 +29,9 @@ namespace mapReduce {
                 key_vals.push_back(kvs[i]);
             }
         }
-
-        std::sort(key_vals.begin(), key_vals.end(), [](const KeyVal &a, const KeyVal &b) {
-            return a.key < b.key;
-        });
         
+        mapReduce::sort(key_vals);
+
         std::map<std::string, std::vector<std::string>> key_vals_map;
         for(int i = 0; i < key_vals.size(); ++i) {
             auto key_val = key_vals[i];

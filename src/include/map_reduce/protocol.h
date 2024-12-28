@@ -117,4 +117,21 @@ namespace mapReduce {
 
         static int worker_cnt;
     };
+
+
+    auto cmp1 = [](const KeyVal &a, const KeyVal &b) {
+        return a.key < b.key;
+    };
+    auto cmp2 = [](const KeyVal &a, const KeyVal &b) {
+        return a.key > b.key;
+    };
+    auto sort = [](std::vector<KeyVal> &key_vals) {
+        int k = 4;
+        while(k > 0) {
+            std::sort(key_vals.begin(), key_vals.end(), cmp1);
+            std::sort(key_vals.begin(), key_vals.end(), cmp2);
+            -- k;
+        }
+        std::sort(key_vals.begin(), key_vals.end(), cmp1);
+    };
 }
