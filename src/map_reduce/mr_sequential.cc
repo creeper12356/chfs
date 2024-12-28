@@ -17,7 +17,7 @@ namespace mapReduce {
     void SequentialMapReduce::doWork() {
         // Your code goes here
         std::vector<KeyVal> key_vals;
-        for (const auto &file : files) {
+        for (auto file : files) {
             auto file_inode_id = chfs_client->lookup(1, file).unwrap();
             auto file_type_attr = chfs_client->get_type_attr(file_inode_id).unwrap();
             auto content_byte_arr = chfs_client->read_file(file_inode_id, 0, file_type_attr.second.size).unwrap();
@@ -25,39 +25,31 @@ namespace mapReduce {
             auto content = std::string(content_byte_arr.begin(), content_byte_arr.end());
 
             std::vector<KeyVal> kvs = Map(content);
-            key_vals.insert(key_vals.end(), kvs.begin(), kvs.end());
+            for(int i = 0;i < kvs.size(); ++i) {
+                key_vals.push_back(kvs[i]);
+            }
         }
 
         std::sort(key_vals.begin(), key_vals.end(), [](const KeyVal &a, const KeyVal &b) {
             return a.key < b.key;
         });
-        // 冒泡排序
-        // int key_vals_size = keyVals.size();
-        // for(int i = 0; i < key_vals_size; ++i) {
-        //     for(int j = 0; j < key_vals_size - i - 1; ++j) {
-        //         if(keyVals[j].key > keyVals[j + 1].key) {
-        //             std::swap(keyVals[j], keyVals[j + 1]);
-        //         }
-        //     }
-        // }
-
-        std::string last_key;
-        std::vector<std::string> values;
-        std::string work_res = "";
-        for (const auto &kv : key_vals) {
-            if (kv.key != last_key) {
-                if (!last_key.empty()) {
-                    std::string reduce_res = Reduce(last_key, values);
-                    work_res += reduce_res;
-                }
-                last_key = kv.key;
-                values.clear();
+        
+        std::map<std::string, std::vector<std::string>> key_vals_map;
+        for(int i = 0; i < key_vals.size(); ++i) {
+            auto key_val = key_vals[i];
+            if(key_vals_map.find(key_val.key) == key_vals_map.end()) {
+                key_vals_map[key_val.key] = std::vector<std::string>({key_val.val});
+            } else {
+                key_vals_map[key_val.key].resize(key_vals_map[key_val.key].size() + 1);
+                key_vals_map[key_val.key][key_vals_map[key_val.key].size() - 1] = key_val.val;
             }
-            values.push_back(kv.val);
         }
-        if (!last_key.empty()) {
-            std::string res = Reduce(last_key, values);
-            work_res += res;
+
+        std::string work_res = "";
+        for(auto it = key_vals_map.begin(); it != key_vals_map.end(); ++it) {
+            auto key = it->first;
+            std::string reduce_res = Reduce(key, key_vals_map[key]);
+            work_res += reduce_res;
         }
 
         auto output_file_inode_id = chfs_client->lookup(1, outPutFile).unwrap();
