@@ -31,6 +31,15 @@ namespace mapReduce {
         std::sort(keyVals.begin(), keyVals.end(), [](const KeyVal &a, const KeyVal &b) {
             return a.key < b.key;
         });
+        // 冒泡排序
+        // int key_vals_size = keyVals.size();
+        // for(int i = 0; i < key_vals_size; ++i) {
+        //     for(int j = 0; j < key_vals_size - i - 1; ++j) {
+        //         if(keyVals[j].key > keyVals[j + 1].key) {
+        //             std::swap(keyVals[j], keyVals[j + 1]);
+        //         }
+        //     }
+        // }
 
         std::string lastKey;
         std::vector<std::string> values;

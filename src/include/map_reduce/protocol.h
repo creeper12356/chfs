@@ -19,7 +19,8 @@ namespace mapReduce {
     enum mr_tasktype {
         NONE = 0,
         MAP,
-        REDUCE
+        REDUCE,
+        MERGE
     };
 
     std::vector<KeyVal> Map(const std::string &content);
@@ -84,6 +85,12 @@ namespace mapReduce {
          * 未分配一定未完成
          */
         std::vector<std::pair<bool, bool>> reduce_tasks;
+
+        /**
+         * @brief 合并任务
+         * 
+         */
+        std::pair<bool, bool> merge_task;
     };
 
     class Worker {
@@ -95,6 +102,7 @@ namespace mapReduce {
     private:
         void doMap(int index, const std::string &filename);
         void doReduce(int index, int nfiles);
+        void doMerge(int n_reduce);
         void doSubmit(mr_tasktype taskType, int index);
 
         std::string outPutFile; //* reduce worker 输出文件名

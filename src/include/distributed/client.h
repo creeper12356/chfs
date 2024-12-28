@@ -161,8 +161,6 @@ private:
   std::shared_ptr<RpcClient>
       metadata_server_; // Currently only one metadata server
   mac_id_t num_data_servers;
-
-  std::mutex mtx;
 };
 
 } // namespace chfs

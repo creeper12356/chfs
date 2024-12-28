@@ -55,6 +55,22 @@ namespace mapReduce {
             }
         }
 
+        for(int i = 0; i < n_reduce; ++i) {
+            if(!reduce_tasks[i].second) {
+                // 存在未完成的reduce task
+                // 暂停分配
+                return std::make_tuple(NONE, -1, -1, "");
+            }
+        }
+
+        // 所有reduce task都完成
+        if(!merge_task.first) {
+            // 未分配merge task
+            // 分配merge task
+            merge_task.first = true;
+            return std::make_tuple(MERGE, -1, reduce_tasks.size(), "");
+        }
+
         // 没有任务可以分配
         return std::make_tuple(NONE, -1, n_reduce, "");
     }
@@ -66,6 +82,9 @@ namespace mapReduce {
             map_tasks[index].second = true;
         } else if(taskType == REDUCE) {
             reduce_tasks[index].second = true;
+        } else {
+            // MERGE
+            merge_task.second = true;
         }
 
         // 检查任务列表，并更新isFinished
@@ -81,6 +100,9 @@ namespace mapReduce {
                 isFinished = false;
                 break;
             }
+        }
+        if(!merge_task.second) {
+            isFinished = false;
         }
         return 0;
     }
@@ -100,6 +122,7 @@ namespace mapReduce {
         // Lab4: Your code goes here (Optional).
         map_tasks = std::vector<std::pair<bool, bool>>(files.size(), std::make_pair(false, false));
         reduce_tasks = std::vector<std::pair<bool, bool>>(nReduce, std::make_pair(false, false));
+        merge_task = std::make_pair(false, false);
     
         rpc_server = std::make_unique<chfs::RpcServer>(config.ip_address, config.port);
         rpc_server->bind(ASK_TASK, [this](int i) { return this->askTask(i); });

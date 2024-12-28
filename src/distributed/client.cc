@@ -193,7 +193,6 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
 
 auto ChfsClient::append_file(inode_id_t id, std::vector<u8> data)
     -> ChfsNullResult {
-  std::unique_lock<std::mutex> lock(mtx);
   auto type_attr = get_type_attr(id).unwrap();
   auto size = type_attr.second.size;
   return write_file(id, size, data);

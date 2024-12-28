@@ -77,7 +77,6 @@ namespace mapReduce {
     }
 
     void Worker::doReduce(int index, int nfiles) {
-        // TODO: sort ?
         MR_WK_LOG("doReduce index: %d nfiles: %d", index, nfiles); 
         std::unordered_map<std::string, std::vector<std::string>> key_vals;
         for(int map_index = 0; map_index < nfiles; ++ map_index) {
@@ -106,12 +105,32 @@ namespace mapReduce {
         }
 
         MR_WK_LOG("append to output file");
-        auto output_file_inode_id = chfs_client->lookup(1, outPutFile).unwrap();
+        std::string output_filename = "mr-out-" + std::to_string(index); 
+        auto output_file_inode_id = chfs_client->mknode(chfs::ChfsClient::FileType::REGULAR, 1, output_filename).unwrap();
         auto append_file_res = chfs_client->append_file(output_file_inode_id, std::vector<chfs::u8>(work_res.begin(), work_res.end()));
         if(append_file_res.is_err()) {
             MR_WK_LOG("append file error");
         }
         MR_WK_LOG("append to output file finished");
+    }
+
+    void Worker::doMerge(int n_reduce) {
+        MR_WK_LOG("doMerge n_reduce: %d", n_reduce);
+        std::string content = "";
+        for(int reduce_index = 0; reduce_index < n_reduce; ++reduce_index) {
+            MR_WK_LOG("read from mr-out-%d", reduce_index);
+            std::string of_name = "mr-out-" + std::to_string(reduce_index);
+            auto of_inode_id = chfs_client->lookup(1, of_name).unwrap();
+            auto of_type_attr = chfs_client->get_type_attr(of_inode_id).unwrap();
+            auto of_content_byte_arr = chfs_client->read_file(of_inode_id, 0, of_type_attr.second.size).unwrap();
+            auto of_content = std::string(of_content_byte_arr.begin(), of_content_byte_arr.end());
+
+            content += of_content;
+        }
+
+        MR_WK_LOG("write to final output file");
+        auto output_file_inode_id = chfs_client->lookup(1, outPutFile).unwrap();
+        chfs_client->write_file(output_file_inode_id, 0, std::vector<chfs::u8>(content.begin(), content.end())).unwrap();
     }
 
     void Worker::doSubmit(mr_tasktype taskType, int index) {
@@ -138,12 +157,16 @@ namespace mapReduce {
                 auto file_name = std::get<3>(asked_task);
                 doMap(map_index, file_name);
                 doSubmit(MAP, map_index);
-            } else {
-                // task_type == REDUCE
+            } else if(task_type == REDUCE) {
                 auto reduce_index = std::get<1>(asked_task);
                 n_map = std::get<2>(asked_task);
                 doReduce(reduce_index, n_map);
                 doSubmit(REDUCE, reduce_index);
+            } else {
+                // task_type == MERGE
+                n_reduce = std::get<2>(asked_task);
+                doMerge(n_reduce);
+                doSubmit(MERGE, -1);
             }
         }
     }
