@@ -149,9 +149,9 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
 
   // print write_set
   // std::cout << "write_set: " << std::endl;
-  for(auto &write_op: write_set) {
-    std::cout << std::get<0>(write_op) << " " << std::get<1>(write_op) << " " << std::get<2>(write_op) << std::endl;
-  }
+  // for(auto &write_op: write_set) {
+  //   std::cout << std::get<0>(write_op) << " " << std::get<1>(write_op) << " " << std::get<2>(write_op) << std::endl;
+  // }
 
   for(auto &write_op: write_set) {
     // 如果block不存在，向metadata server申请一个block

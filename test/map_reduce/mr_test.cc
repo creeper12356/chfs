@@ -168,7 +168,17 @@ namespace mapReduce {
 			kvs.emplace_back(key.substr(first_not_null), value);
 		}
 		std::sort(kvs.begin(), kvs.end());
+		EXPECT_EQ(kvs.size(), correctKvs.size());
 		EXPECT_EQ(kvs, correctKvs) << "incorrect output";
+
+		if(kvs.size() != correctKvs.size()) {
+			std::cout << "===raw result content===" << std::endl;
+			std::cout << content << std::endl;
+			std::cout << "===raw result content===" << std::endl;
+		}
+
 		EXPECT_LE(static_cast<int>(duration.count()), 3 * seq_duration);
+		std::cout << "Distributed MapReduce duration: " << duration.count() << "ms" << std::endl;
+		std::cout << "Sequential MapReduce duration: " << seq_duration << "ms" << std::endl;
 	}
 }

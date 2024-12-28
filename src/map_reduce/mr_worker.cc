@@ -12,12 +12,16 @@
 
 #include "map_reduce/protocol.h"
 
+#if 1
 #define MR_WK_LOG(fmt, args...)                                                                                   \
     {auto now =                                                                                               \
         std::chrono::duration_cast<std::chrono::milliseconds>(                                               \
             std::chrono::system_clock::now().time_since_epoch())                                             \
             .count();                                                                                        \
     printf("[%ld][%s:%d][%d] " fmt "\n", now, __FILE__, __LINE__, worker_id, ##args);}
+#else
+#define MR_WK_LOG(fmt, args...) do {} while(0)
+#endif
 namespace mapReduce {
     int Worker::worker_cnt = 0;
     Worker::Worker(MR_CoordinatorConfig config) {
@@ -38,9 +42,11 @@ namespace mapReduce {
         auto content_byte_arr = chfs_client->read_file(file_inode_id, 0, file_type_attr.second.size).unwrap();
 
         auto content = std::string(content_byte_arr.begin(), content_byte_arr.end());
+        MR_WK_LOG("call Map()");
         auto key_vals = Map(content);
 
         // 划分键值对
+        MR_WK_LOG("partition key-val pairs");
         auto partitioned_key_vals = std::vector<std::vector<KeyVal>>(n_reduce);
         for (const auto &key_val: key_vals) {
             auto hash = std::hash<std::string>{}(key_val.key);
@@ -88,24 +94,24 @@ namespace mapReduce {
                 std::istringstream line_stream(line);
                 std::string key, val;
                 line_stream >> key >> val;
-                MR_WK_LOG("key: %s val: %s", key.c_str(), val.c_str());
                 key_vals[key].push_back(val);
             }
         }
 
+        MR_WK_LOG("call Reduce()");
         std::string work_res;
         for(const auto &key_val: key_vals) {
-            MR_WK_LOG("key: %s", key_val.first.c_str());
-            MR_WK_LOG("val cnt: %lu", key_val.second.size());
             auto reduce_res = Reduce(key_val.first, key_val.second);
             work_res += reduce_res;
         }
 
+        MR_WK_LOG("append to output file");
         auto output_file_inode_id = chfs_client->lookup(1, outPutFile).unwrap();
         auto append_file_res = chfs_client->append_file(output_file_inode_id, std::vector<chfs::u8>(work_res.begin(), work_res.end()));
         if(append_file_res.is_err()) {
             MR_WK_LOG("append file error");
         }
+        MR_WK_LOG("append to output file finished");
     }
 
     void Worker::doSubmit(mr_tasktype taskType, int index) {
