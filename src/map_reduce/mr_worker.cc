@@ -78,7 +78,7 @@ namespace mapReduce {
 
     void Worker::doReduce(int index, int nfiles) {
         MR_WK_LOG("doReduce index: %d nfiles: %d", index, nfiles); 
-        std::unordered_map<std::string, std::vector<std::string>> key_vals;
+        std::vector<KeyVal> key_vals;
         for(int map_index = 0; map_index < nfiles; ++ map_index) {
             std::string if_name = "mr-" + std::to_string(map_index) + "-" + std::to_string(index);
             auto if_inode_id = chfs_client->lookup(1, if_name).unwrap();
@@ -93,15 +93,30 @@ namespace mapReduce {
                 std::istringstream line_stream(line);
                 std::string key, val;
                 line_stream >> key >> val;
-                key_vals[key].push_back(val);
+                key_vals.push_back(KeyVal(key, val));
             }
         }
+        std::sort(key_vals.begin(), key_vals.end(), [](const KeyVal &a, const KeyVal &b) {
+            return a.key < b.key;
+        });
 
-        MR_WK_LOG("call Reduce()");
+        std::string last_key;
+        std::vector<std::string> values;
         std::string work_res;
-        for(const auto &key_val: key_vals) {
-            auto reduce_res = Reduce(key_val.first, key_val.second);
-            work_res += reduce_res;
+        for (const auto &kv: key_vals) {
+            if (kv.key != last_key) {
+                if(!last_key.empty()) {
+                    std::string reduce_res = Reduce(last_key, values);
+                    work_res += reduce_res;
+                }
+                last_key = kv.key;
+                values.clear();
+            }
+            values.push_back(kv.val);
+        }
+        if(!last_key.empty()) {
+            std::string res = Reduce(last_key, values);
+            work_res += res;
         }
 
         MR_WK_LOG("append to output file");
