@@ -7,6 +7,13 @@
 
 #include "map_reduce/protocol.h"
 
+#define MR_CD_LOG(fmt, args...)                                                                                   \
+    {auto now =                                                                                               \
+        std::chrono::duration_cast<std::chrono::milliseconds>(                                               \
+            std::chrono::system_clock::now().time_since_epoch())                                             \
+            .count();                                                                                        \
+    printf("[%ld][%s:%d][C] " fmt "\n", now, __FILE__, __LINE__, ##args);}
+
 namespace mapReduce {
     std::tuple<int, int, int, std::string> Coordinator::askTask(int) {
         // Lab4 : Your code goes here.
@@ -78,6 +85,14 @@ namespace mapReduce {
     // if the entire job has finished.
     bool Coordinator::Done() {
         std::unique_lock<std::mutex> uniqueLock(this->mtx);
+        if(this->isFinished) {
+            for(auto &map_task: this->map_tasks) {
+                MR_CD_LOG("map task: %d, %d", map_task.first, map_task.second);
+            }
+            for(auto &reduce_task: this->reduce_tasks) {
+                MR_CD_LOG("reduce task: %d, %d", reduce_task.first, reduce_task.second);
+            }
+        }
         return this->isFinished;
     }
 

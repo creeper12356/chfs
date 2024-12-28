@@ -11,13 +11,13 @@
 #include <unordered_map>
 
 #include "map_reduce/protocol.h"
-#define MR_LOG(fmt, args...)                                                                                   \
+
+#define MR_WK_LOG(fmt, args...)                                                                                   \
     {auto now =                                                                                               \
         std::chrono::duration_cast<std::chrono::milliseconds>(                                               \
             std::chrono::system_clock::now().time_since_epoch())                                             \
             .count();                                                                                        \
     printf("[%ld][%s:%d][%d] " fmt "\n", now, __FILE__, __LINE__, worker_id, ##args);}
-
 namespace mapReduce {
     int Worker::worker_cnt = 0;
     Worker::Worker(MR_CoordinatorConfig config) {
@@ -32,7 +32,7 @@ namespace mapReduce {
 
     void Worker::doMap(int index, const std::string &filename) {
         // Lab4: Your code goes here.
-        MR_LOG("doMap index: %d filename: %s", index, filename.c_str());
+        MR_WK_LOG("doMap index: %d filename: %s", index, filename.c_str());
         auto file_inode_id = chfs_client->lookup(1, filename).unwrap();
         auto file_type_attr = chfs_client->get_type_attr(file_inode_id).unwrap();
         auto content_byte_arr = chfs_client->read_file(file_inode_id, 0, file_type_attr.second.size).unwrap();
@@ -64,7 +64,7 @@ namespace mapReduce {
                 if_content += key_val.key + " " + key_val.val + "\n";
             }
 
-            MR_LOG("write if name: %s, if size: %lu", if_name.c_str(), if_content.size());
+            MR_WK_LOG("write if name: %s, if size: %lu", if_name.c_str(), if_content.size());
             chfs_client->write_file(if_inode_id, 0, std::vector<chfs::u8>(if_content.begin(), if_content.end())).unwrap();
         }
         
@@ -72,13 +72,13 @@ namespace mapReduce {
 
     void Worker::doReduce(int index, int nfiles) {
         // TODO: sort ?
-        MR_LOG("doReduce index: %d nfiles: %d", index, nfiles); 
+        MR_WK_LOG("doReduce index: %d nfiles: %d", index, nfiles); 
         std::unordered_map<std::string, std::vector<std::string>> key_vals;
         for(int map_index = 0; map_index < nfiles; ++ map_index) {
             std::string if_name = "mr-" + std::to_string(map_index) + "-" + std::to_string(index);
             auto if_inode_id = chfs_client->lookup(1, if_name).unwrap();
             auto if_type_attr = chfs_client->get_type_attr(if_inode_id).unwrap();
-            MR_LOG("read if name: %s, if size: %lu", if_name.c_str(), if_type_attr.second.size);
+            MR_WK_LOG("read if name: %s, if size: %lu", if_name.c_str(), if_type_attr.second.size);
             auto if_content_byte_arr = chfs_client->read_file(if_inode_id, 0, if_type_attr.second.size).unwrap();
             auto if_content = std::string(if_content_byte_arr.begin(), if_content_byte_arr.end());
 
@@ -88,26 +88,29 @@ namespace mapReduce {
                 std::istringstream line_stream(line);
                 std::string key, val;
                 line_stream >> key >> val;
-                MR_LOG("key: %s val: %s", key.c_str(), val.c_str());
+                MR_WK_LOG("key: %s val: %s", key.c_str(), val.c_str());
                 key_vals[key].push_back(val);
             }
         }
 
         std::string work_res;
         for(const auto &key_val: key_vals) {
-            MR_LOG("key: %s", key_val.first.c_str());
-            MR_LOG("val cnt: %lu", key_val.second.size());
+            MR_WK_LOG("key: %s", key_val.first.c_str());
+            MR_WK_LOG("val cnt: %lu", key_val.second.size());
             auto reduce_res = Reduce(key_val.first, key_val.second);
             work_res += reduce_res;
         }
 
-        auto output_file_inode_id = chfs_client->mknode(chfs::ChfsClient::FileType::REGULAR, 1, "mr-" + std::to_string(index) + ".out")
-                                            .unwrap();
-        chfs_client->write_file(output_file_inode_id, 0, std::vector<chfs::u8>(work_res.begin(), work_res.end()));
+        auto output_file_inode_id = chfs_client->lookup(1, outPutFile).unwrap();
+        auto append_file_res = chfs_client->append_file(output_file_inode_id, std::vector<chfs::u8>(work_res.begin(), work_res.end()));
+        if(append_file_res.is_err()) {
+            MR_WK_LOG("append file error");
+        }
     }
 
     void Worker::doSubmit(mr_tasktype taskType, int index) {
         // Lab4: Your code goes here.
+        MR_WK_LOG("finish %s job and submit ", taskType == MAP ? "MAP" : "REDUCE");
         mr_client->call(SUBMIT_TASK, static_cast<int>(taskType), index);
     }
 
