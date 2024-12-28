@@ -16,7 +16,7 @@ namespace mapReduce {
 
     void SequentialMapReduce::doWork() {
         // Your code goes here
-        std::vector<KeyVal> keyVals;
+        std::vector<KeyVal> key_vals;
         for (const auto &file : files) {
             auto file_inode_id = chfs_client->lookup(1, file).unwrap();
             auto file_type_attr = chfs_client->get_type_attr(file_inode_id).unwrap();
@@ -25,10 +25,10 @@ namespace mapReduce {
             auto content = std::string(content_byte_arr.begin(), content_byte_arr.end());
 
             std::vector<KeyVal> kvs = Map(content);
-            keyVals.insert(keyVals.end(), kvs.begin(), kvs.end());
+            key_vals.insert(key_vals.end(), kvs.begin(), kvs.end());
         }
 
-        std::sort(keyVals.begin(), keyVals.end(), [](const KeyVal &a, const KeyVal &b) {
+        std::sort(key_vals.begin(), key_vals.end(), [](const KeyVal &a, const KeyVal &b) {
             return a.key < b.key;
         });
         // 冒泡排序
@@ -41,22 +41,22 @@ namespace mapReduce {
         //     }
         // }
 
-        std::string lastKey;
+        std::string last_key;
         std::vector<std::string> values;
         std::string work_res = "";
-        for (const auto &kv : keyVals) {
-            if (kv.key != lastKey) {
-                if (!lastKey.empty()) {
-                    std::string reduce_res = Reduce(lastKey, values);
+        for (const auto &kv : key_vals) {
+            if (kv.key != last_key) {
+                if (!last_key.empty()) {
+                    std::string reduce_res = Reduce(last_key, values);
                     work_res += reduce_res;
                 }
-                lastKey = kv.key;
+                last_key = kv.key;
                 values.clear();
             }
             values.push_back(kv.val);
         }
-        if (!lastKey.empty()) {
-            std::string res = Reduce(lastKey, values);
+        if (!last_key.empty()) {
+            std::string res = Reduce(last_key, values);
             work_res += res;
         }
 
