@@ -129,6 +129,16 @@ public:
       -> ChfsNullResult;
 
   /**
+   * @brief 从末尾追加数据到文件
+   * 
+   * @param id 
+   * @param data 
+   * @return ChfsNullResult 
+   */
+  auto append_file(inode_id_t id, std::vector<u8> data)
+      -> ChfsNullResult;
+
+  /**
    * It removes a block from a file.
    *
    * @param id: The inode id of the file.

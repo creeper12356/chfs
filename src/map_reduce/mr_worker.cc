@@ -101,9 +101,9 @@ namespace mapReduce {
             work_res += reduce_res;
         }
 
-        // NOTE: outFile已经创建过id
-        auto output_file_inode_id = chfs_client->lookup(1, outPutFile).unwrap();
-        chfs_client->write_file(output_file_inode_id, 0, std::vector<chfs::u8>(work_res.begin(), work_res.end())).unwrap();
+        auto output_file_inode_id = chfs_client->mknode(chfs::ChfsClient::FileType::REGULAR, 1, "mr-" + std::to_string(index) + ".out")
+                                            .unwrap();
+        chfs_client->write_file(output_file_inode_id, 0, std::vector<chfs::u8>(work_res.begin(), work_res.end()));
     }
 
     void Worker::doSubmit(mr_tasktype taskType, int index) {

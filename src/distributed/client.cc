@@ -191,6 +191,13 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
   return KNullOk;
 }
 
+auto ChfsClient::append_file(inode_id_t id, std::vector<u8> data)
+    -> ChfsNullResult {
+  auto type_attr = get_type_attr(id).unwrap();
+  auto size = type_attr.second.size;
+  return write_file(id, size, data);
+}
+
 
 // {Your code here}
 auto ChfsClient::free_file_block(inode_id_t id, block_id_t block_id,
